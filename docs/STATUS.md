@@ -62,6 +62,17 @@ mas os 5 build IDs batem com a tabela acima).
   registradores mostrou o 4º osso faltando só em m[2][3]). Teste: `tools/test_shader_cases.sh`. Verificado em
   screenshots (abertura quadros 340-520, corredor quadro 3000). Afeta todos os backends. PR upstream #35.
 
+- **Crash depois da luta com Ganon** (`no function at 7001a65870`): `adr_feeds_br` (gen.py) só olhava 6 instruções até
+  o `br` de uma tabela de saltos; nesta são 7 -> os casos viravam uma função à parte. Janela 16, parando em outros
+  desvios: +46 tabelas (main 6, subsdk0 25, subsdk1 6, sdk 9), nenhuma perdida. Teste `tools/test_gen.py`. PR #37.
+- **Corações da vida invertidos** (bloco vermelho com corações vazados; também no screenshot Linux da sessão 2):
+  RGB565 (0x3C) mapeado para R5G6B5 no Vulkan (vermelho nos bits altos); a NVN e o Metal têm vermelho nos bits
+  baixos -> B5G6R5 (ou swizzle R<->B). Verificado (quadro 3000). PR #38. 0x39/0x3A/0x3B parecem ter o mesmo
+  descompasso com o Metal, não verificados.
+- Windows: a import library da `eowgame.dll` sobrescrevia `eowrecomp.lib` (segundo link da biblioteca falhava).
+- Teste: `play.bat` agora usa a pasta `save/` (o `test.bat` zera `testsave/` a cada rodada - apagou o save do
+  usuário uma vez).
+
 ### Aberto
 1. Áudio a ouvido (o notebook não tem som).
 2. **SUST** (problema conhecido, sessão 3 item 3): o compute `72a4723000` falha na tradução e é pulado em todo quadro
@@ -73,6 +84,9 @@ mas os 5 build IDs batem com a tabela acima).
    `maxwell_disassemble` é só um stub.
 3. **Travou uma vez na luta com Ganon** (1ª jogada; refeita do autosave, passou). Log perdido (o relançamento
    sobrescreveu o `run.log`): o `play.bat` agora guarda os 3 últimos (`play-1.log` = jogada anterior).
+6. **Portal depois de Ganon**: só o contorno aparece (centro mostra o piso), contorno falha ao mover. Pendente de captura
+   (F9 no jogo grava os passes do quadro seguinte em `build/`). Suspeita: o compute SUST pulado (item 2) ou um efeito
+   de tela que lê a cópia do framebuffer.
 4. Na 1ª entrada numa área: **caixas pretas** (destrutíveis) e uma **escada que demorou a aparecer**. Causa provável
    (medida no log do relançamento): draws **pulados enquanto o programa/pipeline compila** (`skipped: program
    compiling` / `pipeline compiling` em 51 janelas de 2 s, 493 programas pendentes de uma vez). Agravado porque o
@@ -92,7 +106,7 @@ que o vertex shader lê na draw (streams, índices, layout dos atributos, cbufs 
 <vs.glsl> [--trace N] [--far X]` compila o GLSL traduzido (`EOWRECOMP_SAVE_MSL=1`) como C++ e roda cada vértice:
 posições de clip, vértices fora da vista, registradores após cada instrução. Precisa de `build/zig-full/zig`.
 PRs upstream abertos: #32 (ritmo de quadros), #33 (vídeo do título), #34 (build Windows), #35 (LDC.64), #36 (cache
-de pipelines salvo em segundo plano).
+de pipelines salvo em segundo plano), #37 (tabelas de saltos), #38 (RGB565).
 
 ### Como rodar no Windows (dev)
 `C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
