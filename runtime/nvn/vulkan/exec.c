@@ -1868,6 +1868,25 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// EOWRECOMP_VS_DUMP=<vs code addr hex>[:<index count>] (with EOWRECOMP_DEBUG_FRAME): each matching draw of the debug
+// frame writes what its vertex shader reads to build/vsdump/<n>_<count>/ - vertex streams, indices, attribute layout and
+// each constant buffer as bound (driver data and compiler constants included) - for tools/vsemu.py, which runs the
+// translated GLSL (EOWRECOMP_SAVE_MSL) on the CPU over every vertex.
+static int vsdump_state;  // 0 idle, 1 this draw is being dumped (its cbufs are written as they're bound)
+static char vsdump_dir[64];
+static void vsdump_file(const char *name, const void *p, uint64_t n) {
+    char path[256];
+    snprintf(path, sizeof path, "%s/%s", vsdump_dir, name);
+    FILE *f = fopen(path, "wb");
+    if (f) fwrite(p, 1, (size_t)n, f), fclose(f);
+}
+static void vsdump_cb(int stage, int k, const void *p, uint64_t n) {
+    if (vsdump_state != 1 || stage != 0) return;
+    char name[32];
+    snprintf(name, sizeof name, "cb%d.bin", k);
+    vsdump_file(name, p, n);
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -1892,21 +1911,24 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         }
         uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
         if (size < 0x500 && stage == 5) size = 0x500;
+        vsdump_cb(stage, 0, drv, size);
         return ubo_span(copy_dedupe(stage == 5 ? DEDUPE_DRV_C : stage == 1 ? DEDUPE_DRV_F : DEDUPE_DRV_V, drv, size, 256), size);
     }
     if (k == 1) {  // compiler constants stored after the shader code
         NvnShaderStage *ss = &st.program->stages[stage];
         uint64_t size = ss->const_size ? ss->const_size : 16;
         if (size < si->cbuf_size[1]) size = si->cbuf_size[1];
+        vsdump_cb(stage, 1, (const void *)(uintptr_t)(ss->code_addr + ss->const_offset), size);
         return ubo_span(guest_copy(ss->code_addr + ss->const_offset, size), size);  // (constant: shared per submission)
     }
     int idx = k - 3;  // cbuf_base
     Range r = (idx >= 0 && idx < 18) ? st.ubuf[stage][idx] : (Range){0, 0};
     uint64_t size = si->cbuf_size[k] ? si->cbuf_size[k] : 256;
-    if (!r.addr) return ubo_span(vk_transient_copy(zeros, size, 256), size);
+    if (!r.addr) { vsdump_cb(stage, k, zeros, size); return ubo_span(vk_transient_copy(zeros, size, 256), size); }
     if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;
     if (size > r.size && r.size) size = r.size;
     if (size < 16) size = 16;
+    vsdump_cb(stage, k, (const void *)(uintptr_t)r.addr, size);
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
@@ -2966,6 +2988,41 @@ static void draw_(CmdRec *r, bool indexed) {
 }
 
 static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
+    vsdump_state = 0;  // (the previous dumped draw's cbufs were written when it bound them)
+    const char *vd = getenv("EOWRECOMP_VS_DUMP");
+    static int vsdump_n;
+    if (vd && strtoull(vd, NULL, 16) == st.program->stages[0].code_addr &&
+        (!strchr(vd, ':') || strtoull(strchr(vd, ':') + 1, NULL, 10) == r->x[2])) {
+        snprintf(vsdump_dir, sizeof vsdump_dir, "build/vsdump/%02d_%llu", vsdump_n++, (unsigned long long)r->x[2]);
+        mkdir("build", 0755), mkdir("build/vsdump", 0755), mkdir(vsdump_dir, 0755);
+        char mp[96];
+        snprintf(mp, sizeof mp, "%s/meta.txt", vsdump_dir);
+        FILE *m = fopen(mp, "w");
+        if (m) {
+            fprintf(m, "vs %llx\ncount %llu\nindexed %d\nitype %llu\nbase_vertex %d\ninstance %llu\n",
+                    (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)r->x[2], indexed,
+                    (unsigned long long)(indexed ? r->x[1] : 0), indexed ? (int)r->x[4] : 0,
+                    (unsigned long long)(indexed ? r->x[5] : r->x[3]));
+            for (int i = 0; i < 32; i++) {
+                if (!(pr->vi->attr_mask & (1u << i))) continue;
+                uint32_t a = i < st.nattrib ? st.attrib[i] : 0, sn = (a >> 8) & 0x1F;
+                fprintf(m, "attr %d fmt %#x stream %u offset %u stride %u\n", i, a & 0xFF, sn, a >> 13,
+                        sn < (uint32_t)st.nstream ? st.stream[sn][0] : 0);
+            }
+            for (int sn = 0; sn < 16; sn++) {
+                if (!st.vbuf[sn].addr) continue;
+                char name[32];
+                snprintf(name, sizeof name, "vbuf%d.bin", sn);
+                vsdump_file(name, (const void *)(uintptr_t)st.vbuf[sn].addr, st.vbuf[sn].size);
+                fprintf(m, "vbuf %d size %llu\n", sn, (unsigned long long)st.vbuf[sn].size);
+            }
+            if (indexed) vsdump_file("idx.bin", (const void *)(uintptr_t)r->x[3], r->x[2] * (r->x[1] == 1 ? 2 : r->x[1] == 2 ? 4 : 1));
+            fclose(m);
+            vsdump_state = 1;
+            LOG("[vsdump] draw (vs %llx, count %llu) -> %s\n", (unsigned long long)st.program->stages[0].code_addr,
+                (unsigned long long)r->x[2], vsdump_dir);
+        }
+    }
     LOG("[draw] %s inst %llu mode %llu count %llu prog vs=%llx fs=%llx | vs cb %#x fs cb %#x | rt %d", indexed ? "e" : "a",
         (unsigned long long)(indexed ? r->x[6] : r->x[4]), (unsigned long long)r->x[0], (unsigned long long)r->x[2],
         (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
