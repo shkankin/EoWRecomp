@@ -54,11 +54,22 @@ mas os 5 build IDs batem com a tabela acima).
 - Screenshots (`EOWRECOMP_SHOT_AT`) criam `build/` antes de `build/frames`.
 
 ### Aberto
-1. **Faixa escura vertical** de Link até o topo da tela (problema 2 abaixo): o usuário a vê na janela (na abertura e,
-   mais forte, no jogo), mas **nenhuma das >100 capturas** (`EOWRECOMP_SCREENSHOT_EVERY=5`, frames 1200-1725) a
-   mostra no NVIDIA. Hipótese: corrida CPU/GPU nos dados por quadro (a captura espera a GPU). Próximo passo: captura
-   da janela pelo usuário, frequência (fixa ou piscando), depois `EOWRECOMP_DEBUG_FRAME`.
+1. **Faixa vertical em Link** (problema 2 abaixo). **Determinística**: Link parado no corredor depois da luta
+   (com `EOWRECOMP_SHOT_AT`/`SCREENSHOT_EVERY` a partir de ~frame 2600 sem input; andando ela some). Não é sombra: é
+   a malha do próprio Link (azul do capuz, laranja do cabelo), já no passe de geometria (`EOWRECOMP_DEBUG_FRAME=3000`:
+   `pass_017`). Bissecção com `EOWRECOMP_SKIP_COUNT`: **todas** as partes de Link esticam; programa de vértice
+   `72ee677700` (fs `72ee66f300`). Descartado (medido, `EOWRECOMP_DEBUG_DATA`): índices fora do buffer (máx = nº de
+   vértices - 1), osso fora da paleta (a7 R8_UINT = 57 de 58 ossos, cb6 2784 B), base instance (0), formatos dos
+   atributos (0x69 = RGB10A2 SNORM, como no Metal). **Próximo passo**: o shader lê memória global (LDG, pc e98:
+   matriz por instância em cb0[17] + InstanceIndex*64, sob o predicado p0) - verificar se esse caminho roda e de onde
+   vêm os dados; e se vêm do compute que não traduz (`eb20…` SUST, ~1638 dispatches pulados por quadro: problema 3).
+   GLSL: `EOWRECOMP_SAVE_MSL=1` -> `build/glsl/72ee677700_vs.glsl`.
 2. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
+
+### Ferramentas novas
+`EOWRECOMP_SKIP_COUNT=n,…` (pula draws por nº de índices); o log de `EOWRECOMP_DEBUG_FRAME` mostra formatos de
+atributos, e com `EOWRECOMP_DEBUG_DATA` faixa de índices, cbufs de vértice (c[k] = binding k-3) e base instance.
+Atenção: os PNGs por passe precisam de `build/` existente no diretório de dados.
 
 ### Como rodar no Windows (dev)
 `C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
