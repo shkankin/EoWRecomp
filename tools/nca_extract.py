@@ -1,6 +1,7 @@
 """Extract ExeFS and RomFS from a program NCA (NCA3), including compressed sections.
 
-Usage: nca_extract.py <prod.keys> <program.nca | game.nsp | game.xci> <outdir> [--no-romfs] [--romfs-image] [--info]
+Usage: nca_extract.py <prod.keys> <program.nca | game.nsp | game.xci> <outdir> [--no-romfs] [--romfs-image]
+                      [--romfs-src [PATH]] [--info]
 
 An .nsp (a PFS0 of NCAs) or an .xci (root HFS0 -> "secure" HFS0 of NCAs, as runtime/nxpkg.c reads it) is read in
 place: its program NCA is found by content type, nothing is copied out.
@@ -13,7 +14,9 @@ The compression layer sits on top of the integrity layer: its table offset and i
 the hash layers' data region, and its virtual space is the file system itself.
 Hashes are not verified. Writes <outdir>/exefs/<files> and <outdir>/romfs/<tree>; --romfs-image also writes the
 RomFS image itself as <outdir>/romfs.bin (what runtime/services/fs.c serves the game: the original image, byte for
-byte, instead of one rebuilt from the tree).
+byte, instead of one rebuilt from the tree). --romfs-src writes <outdir>/romfs.src instead, the description of the
+RomFS inside the package that runtime/nxpkg.c reads it through (what the start screen's setup writes: no 8 GB copy);
+PATH is the package as the runtime will open it (e.g. its Windows path when extracting from WSL).
 """
 import argparse
 import os
@@ -308,6 +311,20 @@ def extract_romfs(view, base, outdir, progress=True):
     return count, total
 
 
+def write_romfs_src(nca, package, path, outdir):
+    """<outdir>/romfs.src in nx_setup's format (runtime/nxpkg.c): the package, its size, the NCA's offset in it, the
+    RomFS section (offset, size, encryption, counter's upper half), its AES-CTR key, the data region under the hash
+    layers and the compression table (offset, size, BucketTree header)."""
+    rom = nca.sections[1]
+    off, size = data_region(rom)
+    os.makedirs(outdir, exist_ok=True)
+    with open(os.path.join(outdir, 'romfs.src'), 'w', newline='\n') as f:
+        f.write(f'package={package}\nsize={os.path.getsize(path)}\nnca={nca.f.base}\n'
+                f'section={rom.offset} {rom.size} {rom.enc_type} {rom.ctr_hi.hex()}\nkey={rom.key.hex()}\n'
+                f'data={off} {size}\ncomp={rom.comp_off} {rom.comp_size} {rom.comp_header.hex()}\n')
+    print(f'  romfs.src: {package}')
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('keys')
@@ -316,6 +333,7 @@ def main():
     ap.add_argument('--no-romfs', action='store_true')
     ap.add_argument('--info', action='store_true')
     ap.add_argument('--romfs-image', action='store_true')
+    ap.add_argument('--romfs-src', nargs='?', const='', metavar='PATH')
     a = ap.parse_args()
     nca = open_program_nca(a.nca, load_keys(a.keys))
     print(f'title {nca.title_id:016x}  content type {nca.content_type}  sdk {nca.sdk >> 24}.{(nca.sdk >> 16) & 0xFF}.'
@@ -338,6 +356,8 @@ def main():
             print(f'  romfs compression table: {len(v.comp.entries)} entries')
         n, total = extract_romfs(v, 0, os.path.join(a.outdir, 'romfs'))
         print(f'  romfs: {n} files, {total} bytes')
+    if a.romfs_src is not None:
+        write_romfs_src(nca, a.romfs_src or os.path.abspath(a.nca), a.nca, a.outdir)
     if a.romfs_image:
         rom = nca.sections[1]
         v = View(rom)
