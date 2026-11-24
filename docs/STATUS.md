@@ -73,10 +73,15 @@ mas os 5 build IDs batem com a tabela acima).
    `maxwell_disassemble` é só um stub.
 3. **Travou uma vez na luta com Ganon** (1ª jogada; refeita do autosave, passou). Log perdido (o relançamento
    sobrescreveu o `run.log`): o `play.bat` agora guarda os 3 últimos (`play-1.log` = jogada anterior).
-4. Na 1ª entrada numa área: **caixas pretas** (destrutíveis, só sem textura) e uma **escada que demorou a aparecer**;
-   depois aparecem. Suspeita: textura/modelo carregado em streaming sem a atualização chegar à cópia do GPU, ou
-   shader/pipeline ainda compilando. Precisa de repro com log (`EOWRECOMP_SHOT_AT` no ponto).
-5. A linha `[vk]` mostra `upload ~900 MB` a cada 2 s mesmo em cenas simples (425 draws): medir o que é reenviado.
+4. Na 1ª entrada numa área: **caixas pretas** (destrutíveis) e uma **escada que demorou a aparecer**. Causa provável
+   (medida no log do relançamento): draws **pulados enquanto o programa/pipeline compila** (`skipped: program
+   compiling` / `pipeline compiling` em 51 janelas de 2 s, 493 programas pendentes de uma vez). Agravado porque o
+   cache de pipelines só era salvo na saída limpa e a 1ª sessão travou: agora salva em segundo plano (1x/min, PR #36;
+   rodada morta com taskkill: 2574 -> 379 draws pulados na seguinte). Ainda sobra a latência assíncrona mesmo com
+   cache quente (~380 + 460 draws em 80 s). Teste para confirmar: `EOWRECOMP_SYNC_SHADERS=1` (compila na hora: sem
+   pop-in, com engasgos). Descartado: o GetWriteWatch do Windows vê escritas do kernel (ReadFile) - testado.
+5. `upload ~900 MB` a cada 2 s na linha `[vk]`: só na tela de título (vídeo 1080p reenviado a cada quadro). Jogando:
+   ~50 MB/s, quase tudo cbufs (vértices não são copiados). Não é problema.
 
 ### Ferramentas novas
 `EOWRECOMP_SKIP_COUNT=n,…` (pula draws por nº de índices); o log de `EOWRECOMP_DEBUG_FRAME` mostra formatos de
@@ -86,7 +91,8 @@ Atenção: os PNGs por passe precisam de `build/` existente no diretório de dad
 que o vertex shader lê na draw (streams, índices, layout dos atributos, cbufs como ligados). `tools/vsemu.py <dump>
 <vs.glsl> [--trace N] [--far X]` compila o GLSL traduzido (`EOWRECOMP_SAVE_MSL=1`) como C++ e roda cada vértice:
 posições de clip, vértices fora da vista, registradores após cada instrução. Precisa de `build/zig-full/zig`.
-PRs upstream abertos: #32 (ritmo de quadros), #33 (vídeo do título), #34 (build Windows), #35 (LDC.64).
+PRs upstream abertos: #32 (ritmo de quadros), #33 (vídeo do título), #34 (build Windows), #35 (LDC.64), #36 (cache
+de pipelines salvo em segundo plano).
 
 ### Como rodar no Windows (dev)
 `C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
