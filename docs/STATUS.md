@@ -60,9 +60,13 @@ mas os 5 build IDs batem com a tabela acima).
    `pass_017`). Bissecção com `EOWRECOMP_SKIP_COUNT`: **todas** as partes de Link esticam; programa de vértice
    `72ee677700` (fs `72ee66f300`). Descartado (medido, `EOWRECOMP_DEBUG_DATA`): índices fora do buffer (máx = nº de
    vértices - 1), osso fora da paleta (a7 R8_UINT = 57 de 58 ossos, cb6 2784 B), base instance (0), formatos dos
-   atributos (0x69 = RGB10A2 SNORM, como no Metal). **Próximo passo**: o shader lê memória global (LDG, pc e98:
-   matriz por instância em cb0[17] + InstanceIndex*64, sob o predicado p0) - verificar se esse caminho roda e de onde
-   vêm os dados; e se vêm do compute que não traduz (`eb20…` SUST, ~1638 dispatches pulados por quadro: problema 3).
+   atributos (0x69 = RGB10A2 SNORM, como no Metal). Também medido no quadro 3000 (prints locais): o caminho LDG
+   (matriz por instância) **não roda** para Link (p0 = cb12[0][1] == 1; Link tem 0); osso 57 (capuz) é rotação +
+   translação limpa; posições a0 de todas as partes dentro de +-1,5 m; base instance 0; índices no intervalo.
+   Conclusão: entradas corretas, a mesma draw desenha o capuz certo **e** a faixa -> erro na **tradução do shader**
+   num caminho que depende do vértice (normal/tangente a6/a9, uv a1?). **Próximo passo**: captura das saídas do
+   vertex shader (ex.: `EOWRECOMP_VS_CAPTURE=<vs>`: o tradutor grava gl_Position por gl_VertexIndex num SSBO, despejado
+   no quadro de debug) para achar os vértices errados e a instrução que diverge.
    GLSL: `EOWRECOMP_SAVE_MSL=1` -> `build/glsl/72ee677700_vs.glsl`.
 2. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
 
