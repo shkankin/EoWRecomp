@@ -1,6 +1,6 @@
 # Status
 
-Atualizado: 2026-10-20 (sessão 3: macOS / Android).
+Atualizado: 2026-11-23 (sessão 4: Windows x64, RTX 3070).
 
 ## Jogo fixado (único build suportado)
 
@@ -25,6 +25,46 @@ Build IDs dos módulos (endereços de patches/HLE valem só para estes):
 | rtld | `2f1967113a281280a48ce3fc6dc23049327bf924` | 7 358 B |
 
 RomFS: 10 963 arquivos, 8 032 371 686 bytes (todos com magic válido: FRES, BNTX, MsgS, FSTM, SARC, FSHA, webm…).
+
+## Sessão 4 (2026-11-23, Lenovo Legion 5 Pro, RTX 3070 Laptop, Windows 11): Windows
+
+Build cruzado no WSL2 (Ubuntu 26.04, sem sudo) com zig 0.17: `make gen` 81 s, `tools/windows/build.sh -j12 all`
+28 min (16 threads, 15 GB). Pacote do usuário: **XCI** (program NCA `22145480…`, nome diferente do NSP da sessão 1,
+mas os 5 build IDs batem com a tabela acima).
+
+### Comprovado no Windows (Vulkan, driver NVIDIA - primeira vez fora do Mesa ANV)
+- Abertura correta, primeira cena controlável; **controle testado pelo usuário** (todos os botões, resposta natural).
+- **60,0 fps travados** (antes da correção abaixo: 117 fps). 90 s sem travar.
+- Tela de título (vídeo `rd000_Title.webm`) depois de "Exit to title"; save gravado e lido de volta (o jogo volta a
+  abrir na tela de título com o save da sessão anterior).
+- Áudio: **não verificado** (o notebook não tem saída de som).
+
+### Corrigido nesta sessão
+- `nca_extract.py`: lê **XCI** (HFS0 raiz -> partição `secure`), e `--romfs-src [caminho]` escreve o
+  `extracted/romfs.src` (RomFS lido direto do pacote; o caminho como o runtime o abre, ex. `C:\...` a partir do WSL).
+- `nxpkg.c` nunca tinha sido compilado para Windows (`pread`, `mkdir` de 2 argumentos): inclui `platform.h`.
+- Windows: `rename` com semântica POSIX (substitui o destino; o da CRT falha com EEXIST - quebrava um segundo setup
+  e a recompilação da `eowgame.dll`).
+- **Ritmo de quadros**: a janela NVN não segurava o jogo (acquire voltava na hora, intervalo ignorado). Numa GPU
+  rápida o jogo apresentava a cada 8,55 ms (117 fps para 60 vsyncs/s, `EOWRECOMP_LOG_PACE`): o mundo a ~2x.
+  Agora a janela imita a fila do display do Switch (textura mostrada num vsync, a anterior liberada nele; acquire
+  espera). Afeta Linux/macOS também em GPUs que passem de 60 fps. A linha `[vk]` mostra `vsync N/s`.
+- **Vídeos** (`hle/movie.c`) liam só arquivos soltos em `extracted/romfs/`; com o RomFS lido do pacote (setup da tela
+  inicial) a tela de título ficava preta. Agora leem pelo RomFS do `fs.c` (I/O próprio do FFmpeg).
+- Screenshots (`EOWRECOMP_SHOT_AT`) criam `build/` antes de `build/frames`.
+
+### Aberto
+1. **Faixa escura vertical** de Link até o topo da tela (problema 2 abaixo): o usuário a vê na janela (na abertura e,
+   mais forte, no jogo), mas **nenhuma das >100 capturas** (`EOWRECOMP_SCREENSHOT_EVERY=5`, frames 1200-1725) a
+   mostra no NVIDIA. Hipótese: corrida CPU/GPU nos dados por quadro (a captura espera a GPU). Próximo passo: captura
+   da janela pelo usuário, frequência (fixa ou piscando), depois `EOWRECOMP_DEBUG_FRAME`.
+2. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
+
+### Como rodar no Windows (dev)
+`C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
+save de teste em `testsave/`, log em `run.log`; variáveis `EOWRECOMP_*` passam por `WSLENV` a partir do WSL) e
+`play.bat` (áudio ligado, mantém o save). No WSL sem sudo: `make` de `apt-get download make`; `tools/venv` sem
+`python3-venv` (`venv --without-pip` + wheel do pip); `zstd`/`unzip` para `fetch_deps.sh` faltavam.
 
 ## Sessão 3 (2026-10-20, MacBook Air M1 8 GB, macOS 27): macOS e Android
 
@@ -116,9 +156,7 @@ Linux** (Intel Iris Xe, Mesa ANV). Metal não foi tocado nem testado.
    (imagens por passe) para achar o draw.
 3. Dois compute shaders sem tradução (RED com min/max assinado; `SUST` `eb20…`): 128 dispatches pulados.
 4. Áudio não verificado a ouvido; save não testado (o diretório monta).
-5. **Windows**: o `.exe` cruzado linka (7 exports para a DLL do jogo); a compilação da `eowgame.dll` foi
-   interrompida a pedido do usuário em 44%. Rodar `tools/windows/build.sh all` de novo (só recompila o que falta) e
-   testar no Windows.
+5. **Windows**: roda (sessão 4).
 
 ### Como testar (Linux)
 - `tools/run.sh` (SECS=60; janela oculta; `SHOW=1` mostra) — log em `build/run.log`, pilha do jogo resolvida
