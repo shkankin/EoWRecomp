@@ -2492,6 +2492,13 @@ static CsProg *compute_program(NvnProgram *np) {
     cp->p.vi = cp->si;
     if (!cp->si->msl) {
         LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
+        if (getenv("EOWRECOMP_DUMP_SHADERS")) {  // (as renderer.m: the code for offline disassembly)
+            char path[128];
+            mkdir("build", 0755), mkdir("build/shaders", 0755);
+            snprintf(path, sizeof path, "build/shaders/fail_%llx_cs_code.bin", (unsigned long long)ss->code_addr);
+            FILE *f = fopen(path, "wb");
+            if (f) fwrite((const void *)(uintptr_t)ss->code_addr, 1, ss->const_offset ? ss->const_offset : 0x2000, f), fclose(f);
+        }
         const uint32_t *wd = (const uint32_t *)(uintptr_t)ss->code_addr;  // (the blob's start: header layout)
         LOG("[compute]   blob:");
         for (int i = 0; i < 40; i++) LOG("%s%08x", i % 8 ? " " : "\n[compute]     ", wd[i]);

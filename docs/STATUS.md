@@ -61,7 +61,15 @@ mas os 5 build IDs batem com a tabela acima).
   screenshots (abertura quadros 340-520, corredor quadro 3000). Afeta todos os backends. PR upstream #35.
 
 ### Aberto
-1. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
+1. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu (o save do prólogo só guarda opções: o jogo
+   volta à abertura; testar depois de avançar na história).
+2. **SUST** (problema conhecido, sessão 3 item 3): o compute `72a4723000` falha na tradução e é pulado em todo quadro
+   (`skipped: compute program N` na linha `[vk]`). Decodificado (`EOWRECOMP_DUMP_SHADERS=1` grava agora
+   `build/shaders/fail_<addr>_cs_code.bin`): em +0x458 `eb20138600f70018` = **SUST.P.2D.RGBA [R0,R1], R24..R27**,
+   imagem no slot de handle 0x138 (campo 36..48); o shader também faz gathers (TLD4). Falta: caso no tradutor
+   (imageStore), descritores de imagem de armazenamento no compute Vulkan, resolver o handle de imagem NVN
+   (`nvnCommandBufferBindImage(s)` / cbuf) para a textura, e `VK_IMAGE_USAGE_STORAGE_BIT` nessas texturas.
+   `maxwell_disassemble` é só um stub.
 
 ### Ferramentas novas
 `EOWRECOMP_SKIP_COUNT=n,…` (pula draws por nº de índices); o log de `EOWRECOMP_DEBUG_FRAME` mostra formatos de
