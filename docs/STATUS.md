@@ -52,28 +52,26 @@ mas os 5 build IDs batem com a tabela acima).
 - **Vídeos** (`hle/movie.c`) liam só arquivos soltos em `extracted/romfs/`; com o RomFS lido do pacote (setup da tela
   inicial) a tela de título ficava preta. Agora leem pelo RomFS do `fs.c` (I/O próprio do FFmpeg).
 - Screenshots (`EOWRECOMP_SHOT_AT`) criam `build/` antes de `build/frames`.
+- **Faixa vertical em Link** (aparecia já nos primeiros segundos da abertura e no corredor parado): erro de tradução
+  do **LDC.64** quando o registrador de destino é o de endereço (`LDC.64 R6, c[6][R6+0x28]` virava
+  `r6 = cbr(.., r6+40); r7 = cbr(.., r6+44)` - a 2ª palavra vinha do offset errado). O skinning de 4 ossos de Link
+  (vs `72ee677700`) carrega assim a translação z do 4º osso: vértices com peso no 4º osso iam para longe. Achado
+  com `EOWRECOMP_VS_DUMP` + `tools/vsemu.py` (150 de 930 vértices de uma malha fora da tela também na CPU; trace dos
+  registradores mostrou o 4º osso faltando só em m[2][3]). Teste: `tools/test_shader_cases.sh`. Verificado em
+  screenshots (abertura quadros 340-520, corredor quadro 3000). Afeta todos os backends. PR upstream #35.
 
 ### Aberto
-1. **Faixa vertical em Link** (problema 2 abaixo). **Determinística**: Link parado no corredor depois da luta
-   (com `EOWRECOMP_SHOT_AT`/`SCREENSHOT_EVERY` a partir de ~frame 2600 sem input; andando ela some). Não é sombra: é
-   a malha do próprio Link (azul do capuz, laranja do cabelo), já no passe de geometria (`EOWRECOMP_DEBUG_FRAME=3000`:
-   `pass_017`). Bissecção com `EOWRECOMP_SKIP_COUNT`: **todas** as partes de Link esticam; programa de vértice
-   `72ee677700` (fs `72ee66f300`). Descartado (medido, `EOWRECOMP_DEBUG_DATA`): índices fora do buffer (máx = nº de
-   vértices - 1), osso fora da paleta (a7 R8_UINT = 57 de 58 ossos, cb6 2784 B), base instance (0), formatos dos
-   atributos (0x69 = RGB10A2 SNORM, como no Metal). Também medido no quadro 3000 (prints locais): o caminho LDG
-   (matriz por instância) **não roda** para Link (p0 = cb12[0][1] == 1; Link tem 0); osso 57 (capuz) é rotação +
-   translação limpa; posições a0 de todas as partes dentro de +-1,5 m; base instance 0; índices no intervalo.
-   Conclusão: entradas corretas, a mesma draw desenha o capuz certo **e** a faixa -> erro na **tradução do shader**
-   num caminho que depende do vértice (normal/tangente a6/a9, uv a1?). **Próximo passo**: captura das saídas do
-   vertex shader (ex.: `EOWRECOMP_VS_CAPTURE=<vs>`: o tradutor grava gl_Position por gl_VertexIndex num SSBO, despejado
-   no quadro de debug) para achar os vértices errados e a instrução que diverge.
-   GLSL: `EOWRECOMP_SAVE_MSL=1` -> `build/glsl/72ee677700_vs.glsl`.
-2. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
+1. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu.
 
 ### Ferramentas novas
 `EOWRECOMP_SKIP_COUNT=n,…` (pula draws por nº de índices); o log de `EOWRECOMP_DEBUG_FRAME` mostra formatos de
 atributos, e com `EOWRECOMP_DEBUG_DATA` faixa de índices, cbufs de vértice (c[k] = binding k-3) e base instance.
 Atenção: os PNGs por passe precisam de `build/` existente no diretório de dados.
+`EOWRECOMP_VS_DUMP=<vs>[:<nº de índices>]` (com `EOWRECOMP_DEBUG_FRAME`): grava em `build/vsdump/<n>_<count>/` tudo o
+que o vertex shader lê na draw (streams, índices, layout dos atributos, cbufs como ligados). `tools/vsemu.py <dump>
+<vs.glsl> [--trace N] [--far X]` compila o GLSL traduzido (`EOWRECOMP_SAVE_MSL=1`) como C++ e roda cada vértice:
+posições de clip, vértices fora da vista, registradores após cada instrução. Precisa de `build/zig-full/zig`.
+PRs upstream abertos: #32 (ritmo de quadros), #33 (vídeo do título), #34 (build Windows), #35 (LDC.64).
 
 ### Como rodar no Windows (dev)
 `C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
