@@ -1,8 +1,9 @@
 """Extract ExeFS and RomFS from a program NCA (NCA3), including compressed sections.
 
-Usage: nca_extract.py <prod.keys> <program.nca | game.nsp> <outdir> [--no-romfs] [--romfs-image] [--info]
+Usage: nca_extract.py <prod.keys> <program.nca | game.nsp | game.xci> <outdir> [--no-romfs] [--romfs-image] [--info]
 
-An .nsp (a PFS0 of NCAs) is read in place: its program NCA is found by content type, nothing is copied out.
+An .nsp (a PFS0 of NCAs) or an .xci (root HFS0 -> "secure" HFS0 of NCAs, as runtime/nxpkg.c reads it) is read in
+place: its program NCA is found by content type, nothing is copied out.
 
 hactool (SciresM) can't read this game's program NCA: its RomFS section is stored through the BucketTree
 compression layer (LZ4 blocks, firmware 12+), and hactool aborts on it before writing even the ExeFS. Layout as in
@@ -51,32 +52,49 @@ class SubFile:
         return self.f.read(n)
 
 
-def nsp_ncas(path):
-    """[(name, offset, size)] of the .nca entries of an NSP (PFS0)."""
+def read_fs0(f, base):
+    """[(name, offset, size)] of a PFS0 (entry 0x18) / HFS0 (entry 0x40) at `base`, offsets absolute in the file."""
+    f.seek(base)
+    magic, n, strsz, _ = struct.unpack('<4sIII', f.read(0x10))
+    if magic not in (b'PFS0', b'HFS0'):
+        return None
+    esz = 0x40 if magic == b'HFS0' else 0x18
+    ents = [struct.unpack_from('<QQI', f.read(esz)) for _ in range(n)]
+    names = f.read(strsz)
+    data = base + 0x10 + n * esz + strsz
+    return [(names[no:names.index(b'\0', no)].decode(), data + off, size) for off, size, no in ents]
+
+
+def package_ncas(path):
+    """[(name, offset, size)] of the .nca entries of an NSP (PFS0) or an XCI (the root HFS0's "secure" partition)."""
     with open(path, 'rb') as f:
-        magic, n, strsz, _ = struct.unpack('<4sIII', f.read(0x10))
-        if magic != b'PFS0':
-            raise SystemExit(f'{path}: not an NSP (PFS0)')
-        ents = [struct.unpack('<QQII', f.read(0x18)) for _ in range(n)]
-        names = f.read(strsz)
-    data = 0x10 + n * 0x18 + strsz
-    end = data + max(off + size for off, size, _, _ in ents)
+        head = f.read(0x200)
+        if head[:4] == b'PFS0':
+            ents = read_fs0(f, 0)
+        elif head[0x100:0x104] == b'HEAD':  # XCI: card header, root HFS0 offset at 0x130
+            root = struct.unpack_from('<Q', head, 0x130)[0]
+            parts = read_fs0(f, root)
+            if parts is None:
+                raise SystemExit(f'{path}: bad XCI (no root HFS0)')
+            ents = next((read_fs0(f, off) for name, off, _ in parts if name == 'secure'), None)
+            if not ents:
+                raise SystemExit(f'{path}: XCI without a secure partition')
+        else:
+            raise SystemExit(f'{path}: not an NSP (PFS0) or XCI')
+        if ents is None:
+            raise SystemExit(f'{path}: bad NSP')
+    end = max(off + size for _, off, size in ents)
     have = os.path.getsize(path)
     if have < end:  # (a copy cut short: the ExeFS and the RomFS's compression table sit at the program NCA's end)
         raise SystemExit(f'{path}: truncated, {have} bytes of {end} ({(end - have) / 2**20:.0f} MiB missing); '
-                         'copy the NSP again')
-    out = []
-    for off, size, no, _ in ents:
-        name = names[no:names.index(b'\0', no)].decode()
-        if name.endswith('.nca') and not name.endswith('.cnmt.nca'):
-            out.append((name, data + off, size))
-    return out
+                         'copy the package again')
+    return [e for e in ents if e[0].endswith('.nca') and not e[0].endswith('.cnmt.nca')]
 
 
 def open_program_nca(path, keys):
-    if not path.lower().endswith('.nsp'):
+    if not path.lower().endswith(('.nsp', '.xci')):
         return Nca(path, keys)
-    for name, off, _size in sorted(nsp_ncas(path), key=lambda e: -e[2]):
+    for name, off, _size in sorted(package_ncas(path), key=lambda e: -e[2]):
         nca = Nca(path, keys, off, need_sections=False)
         if nca.content_type == 0:
             print(f'{path}: program NCA {name}')
