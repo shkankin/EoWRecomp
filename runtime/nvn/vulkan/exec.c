@@ -2609,6 +2609,19 @@ static void draw_(CmdRec *r, bool indexed) {
         if (g_debug_frame && getenv("EOWRECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
     }
+    {   // EOWRECOMP_SKIP_COUNT=n1,n2,...: drop draws with these index / vertex counts (bisect which draw makes what:
+        // the counts are in the EOWRECOMP_DEBUG_FRAME log; a fragment shader is often shared by many objects)
+        static uint64_t sc[8];
+        static int nsc = -1;
+        if (nsc < 0) {
+            nsc = 0;
+            for (const char *p = getenv("EOWRECOMP_SKIP_COUNT"); p && *p && nsc < 8;) {
+                sc[nsc++] = strtoull(p, (char **)&p, 10);
+                while (*p == ',') p++;
+            }
+        }
+        for (int i = 0; i < nsc; i++) if (r->x[2] == sc[i]) { SKIP(SKIP_LIST); return; }
+    }
     if (g_debug_frame) debug_draw(pr, r, indexed);
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
@@ -2962,12 +2975,57 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG(" | vp %.0f %.0f %.0f %.0f | attrs %#x blend %#x ds %02x%02x%02x poly %02x%02x chmask %08x\n", st.viewport[0][0], st.viewport[0][1],
         st.viewport[0][2], st.viewport[0][3], pr->vi->attr_mask, st.color_state[0], st.ds[0], st.ds[1], st.ds[2], st.poly[0], st.poly[1],
         st.channel_mask);
+    LOG("[draw]   attribs (a<n> nvn fmt -> vk fmt / stream:offset, stride):");  // (as the pipeline key takes them)
+    for (int i = 0; i < 32; i++) {
+        if (!(pr->vi->attr_mask & (1u << i))) continue;
+        uint32_t a = i < st.nattrib ? st.attrib[i] : 0;
+        uint32_t s = (a >> 8) & 0x1F;
+        LOG(" a%d %#x->%d/%u:%u,%u", i, a & 0xFF, (int)vertex_format_supported(vertex_format(a & 0xFF)), s, a >> 13,
+            s < (uint32_t)st.nstream ? st.stream[s][0] : 0);
+    }
+    LOG("\n");
     if (getenv("EOWRECOMP_DEBUG_DATA")) {  // vertex streams 0-1 and fragment cbufs: the first floats
         for (int s = 0; s < 2; s++) {
             if (!st.vbuf[s].addr) continue;
             const float *v = (const float *)(uintptr_t)st.vbuf[s].addr;
             LOG("[draw]   vbuf%d %llx size %llu:", s, (unsigned long long)st.vbuf[s].addr, (unsigned long long)st.vbuf[s].size);
             for (int k = 0; k < 16; k++) LOG(" %.4g", v[k]);
+            LOG("\n");
+        }
+        {   // instancing: base instance, and the first 64 bytes of vertex storage buffer 0 at it (per-instance data)
+            uint32_t bi = (uint32_t)(indexed ? r->x[5] : r->x[3]);
+            const Range *sb = &st.sbuf[0][0];
+            LOG("[draw]   base instance %u, vertex sbuf0 %llx size %llu", bi, (unsigned long long)sb->addr, (unsigned long long)sb->size);
+            for (int k = 0; sb->addr && k < 12 && (uint64_t)bi * 64 + k * 4 + 4 <= sb->size; k++)
+                LOG(" %.4g", ((const float *)(uintptr_t)sb->addr)[bi * 16 + k]);
+            LOG("\n");
+        }
+        if (indexed && r->x[1] >= 1 && r->x[1] <= 2) {  // indices: their range against stream 0's vertices
+            uint32_t hi = 0, n = (uint32_t)r->x[2];
+            const void *ix = (const void *)(uintptr_t)r->x[3];
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t v = r->x[1] == 1 ? ((const uint16_t *)ix)[i] : ((const uint32_t *)ix)[i];
+                if (v > hi && !(st.prim_restart && v == st.restart_index)) hi = v;
+            }
+            uint32_t stride0 = st.nstream ? st.stream[0][0] : 0;
+            LOG("[draw]   indices %u-bit max %u base vertex %d, stream 0 holds %llu vertices\n", r->x[1] == 1 ? 16 : 32, hi,
+                (int)r->x[4], (unsigned long long)(stride0 ? st.vbuf[0].size / stride0 : 0));
+        }
+        for (int i = 0; i < st.nattrib && i < 32; i++) {  // 8-bit integer attributes (bone indices): their range
+            uint32_t a = st.attrib[i], fmt = a & 0xFF, s = (a >> 8) & 0x1F;
+            if (!((pr->vi->attr_mask >> i) & 1) || (fmt != 0x03 && fmt != 0x27) || s >= 16 || !st.vbuf[s].addr) continue;
+            uint32_t stride = s < (uint32_t)st.nstream ? st.stream[s][0] : 0, n = fmt == 0x27 ? 4 : 1, lo = 255, hi = 0;
+            const uint8_t *v = (const uint8_t *)(uintptr_t)st.vbuf[s].addr;
+            for (uint64_t o = a >> 13; stride && o + n <= st.vbuf[s].size; o += stride)
+                for (uint32_t k = 0; k < n; k++) lo = v[o + k] < lo ? v[o + k] : lo, hi = v[o + k] > hi ? v[o + k] : hi;
+            LOG("[draw]   a%d values %u..%u over %llu vertices\n", i, lo, hi, (unsigned long long)(stride ? st.vbuf[s].size / stride : 0));
+        }
+        for (int k = 3; k < 21; k++) {  // vertex shader cbufs c[k] = the game's binding k - 3 (ubo_for): bound ranges
+            if (!((pr->vi->cbuf_mask >> k) & 1)) continue;
+            const Range *u = &st.ubuf[0][k - 3];
+            LOG("[draw]   vcb%d (binding %d) %llx size %u, shader reads %u:", k, k - 3, (unsigned long long)u->addr,
+                (unsigned)u->size, (unsigned)pr->vi->cbuf_size[k]);
+            for (uint32_t w = 0; u->addr && w < 8 && w * 4 < u->size; w++) LOG(" %08x", ((const uint32_t *)(uintptr_t)u->addr)[w]);
             LOG("\n");
         }
         for (int c = 0; c < 18; c++) {
