@@ -38,6 +38,8 @@ mas os 5 build IDs batem com a tabela acima).
 - Tela de título (vídeo `rd000_Title.webm`) depois de "Exit to title"; save gravado e lido de volta (o jogo volta a
   abrir na tela de título com o save da sessão anterior).
 - Áudio: **não verificado** (o notebook não tem saída de som).
+- **Jogado pelo usuário** (com a correção do LDC.64): prólogo inteiro até a luta com Ganon e o começo com Zelda, sem
+  artefatos visuais. Autosave carregado pela tela de título depois de reabrir; saves manuais funcionam.
 
 ### Corrigido nesta sessão
 - `nca_extract.py`: lê **XCI** (HFS0 raiz -> partição `secure`), e `--romfs-src [caminho]` escreve o
@@ -61,8 +63,7 @@ mas os 5 build IDs batem com a tabela acima).
   screenshots (abertura quadros 340-520, corredor quadro 3000). Afeta todos os backends. PR upstream #35.
 
 ### Aberto
-1. Áudio a ouvido; novo jogo a partir do título; carregar save pelo menu (o save do prólogo só guarda opções: o jogo
-   volta à abertura; testar depois de avançar na história).
+1. Áudio a ouvido (o notebook não tem som).
 2. **SUST** (problema conhecido, sessão 3 item 3): o compute `72a4723000` falha na tradução e é pulado em todo quadro
    (`skipped: compute program N` na linha `[vk]`). Decodificado (`EOWRECOMP_DUMP_SHADERS=1` grava agora
    `build/shaders/fail_<addr>_cs_code.bin`): em +0x458 `eb20138600f70018` = **SUST.P.2D.RGBA [R0,R1], R24..R27**,
@@ -70,6 +71,12 @@ mas os 5 build IDs batem com a tabela acima).
    (imageStore), descritores de imagem de armazenamento no compute Vulkan, resolver o handle de imagem NVN
    (`nvnCommandBufferBindImage(s)` / cbuf) para a textura, e `VK_IMAGE_USAGE_STORAGE_BIT` nessas texturas.
    `maxwell_disassemble` é só um stub.
+3. **Travou uma vez na luta com Ganon** (1ª jogada; refeita do autosave, passou). Log perdido (o relançamento
+   sobrescreveu o `run.log`): o `play.bat` agora guarda os 3 últimos (`play-1.log` = jogada anterior).
+4. Na 1ª entrada numa área: **caixas pretas** (destrutíveis, só sem textura) e uma **escada que demorou a aparecer**;
+   depois aparecem. Suspeita: textura/modelo carregado em streaming sem a atualização chegar à cópia do GPU, ou
+   shader/pipeline ainda compilando. Precisa de repro com log (`EOWRECOMP_SHOT_AT` no ponto).
+5. A linha `[vk]` mostra `upload ~900 MB` a cada 2 s mesmo em cenas simples (425 draws): medir o que é reenviado.
 
 ### Ferramentas novas
 `EOWRECOMP_SKIP_COUNT=n,…` (pula draws por nº de índices); o log de `EOWRECOMP_DEBUG_FRAME` mostra formatos de
