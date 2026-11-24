@@ -685,7 +685,7 @@ void backend_present(NvnTexture *t) {
     {   // EOWRECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
         static const char *next;
         static int init;
-        if (!init) { init = 1; next = getenv("EOWRECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        if (!init) { init = 1; next = getenv("EOWRECOMP_SHOT_AT"); if (next) mkdir("build", 0755), mkdir("build/frames", 0755); }
         while (next && *next) {
             long at = strtol(next, (char **)&next, 10);
             if ((long)total_frames < at) { while (next > getenv("EOWRECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
@@ -701,7 +701,7 @@ void backend_present(NvnTexture *t) {
     if (shot_from < 0) { const char *e = getenv("EOWRECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
         char path[256];
-        if (shot_from) mkdir("build/frames", 0755);
+        if (shot_from) mkdir("build", 0755), mkdir("build/frames", 0755);
         snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
                  (unsigned long long)total_frames);
         renderer_save_texture_tex(b, path);
@@ -715,9 +715,14 @@ void backend_present(NvnTexture *t) {
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
         extern const char *game_level_name(void);
+        extern volatile uint64_t g_vsync_count;  // (hle/vi.c: the emulated vsyncs the game paces itself by - ~60/s)
+        static uint64_t last_vsync;
+        uint64_t vs = g_vsync_count;
         if (last_fps_time > 0)
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
-                frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+            LOG("[vk] t=%.1f frame %llu %.1f fps (vsync %.1f/s) max %.0fms level %s (%s)\n", now,
+                (unsigned long long)total_frames, frames / (now - last_fps_time), (vs - last_vsync) / (now - last_fps_time),
+                max_gap * 1000.0, game_level_name(), renderer_stats());
+        last_vsync = vs;
         max_gap = 0;
         frames = 0;
         last_fps_time = now;
