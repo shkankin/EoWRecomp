@@ -70,6 +70,15 @@ mas os 5 build IDs batem com a tabela acima).
   baixos -> B5G6R5 (ou swizzle R<->B). Verificado (quadro 3000). PR #38. 0x39/0x3A/0x3B parecem ter o mesmo
   descompasso com o Metal, não verificados.
 - Windows: a import library da `eowgame.dll` sobrescrevia `eowrecomp.lib` (segundo link da biblioteca falhava).
+- **Crash depois do título de Zelda** (`no function at 7001810220`): outra tabela de saltos, `adr` a 17 instruções do
+  `br`; agora segue código em linha reta até 64 (para em desvios). Medido: nenhuma precisa de mais de 21. PR #37.
+- **Cidade preta por ~15 s na 1ª entrada** (e o "pop-in" em geral): shaders com BRX viravam um `switch` com um `case`
+  por instrução (~1300); o compilador da NVIDIA levava 10-30 s por pipeline (e de novo a cada variante de estado).
+  Agora o tradutor lê a tabela do BRX em c[1] (`maxwell_cb1`, apontado pelo backend Vulkan) e só os alvos viram
+  labels. Cache frio, entrando na cidade: compilação de pipelines 429 s -> 41 s, a mais lenta 32 s -> 1,6 s, draws
+  pulados 225533 -> 53779. Metal não ligado (sem `maxwell_cb1` = comportamento antigo). PR #39 (sobre o #35).
+- Windows: a import library vai depois dos objetos no link da `eowgame.dll` (o zig nomeia a da DLL pelo 1º arquivo
+  de entrada e ignora `--out-implib`): o 2º link sempre falhava.
 - Teste: `play.bat` agora usa a pasta `save/` (o `test.bat` zera `testsave/` a cada rodada - apagou o save do
   usuário uma vez).
 
@@ -84,9 +93,14 @@ mas os 5 build IDs batem com a tabela acima).
    `maxwell_disassemble` é só um stub.
 3. **Travou uma vez na luta com Ganon** (1ª jogada; refeita do autosave, passou). Log perdido (o relançamento
    sobrescreveu o `run.log`): o `play.bat` agora guarda os 3 últimos (`play-1.log` = jogada anterior).
-6. **Portal depois de Ganon**: só o contorno aparece (centro mostra o piso), contorno falha ao mover. Pendente de captura
-   (F9 no jogo grava os passes do quadro seguinte em `build/`). Suspeita: o compute SUST pulado (item 2) ou um efeito
-   de tela que lê a cópia do framebuffer.
+6. **Portal no chão (fendas)**: só pedaços do contorno; o centro mostra o piso. Captura F9 (quadro 2306): a máscara
+   da fenda (estrela) é desenhada num alvo 1024x1024 f0x25 (pass 017) e a draw da fenda no G-buffer (vs 72a46f4000,
+   fs 72a46f5000, 1152 índices) lê essa máscara (tex3) **e a profundidade** que ela mesma usa (tex1 = o anexo de
+   profundidade; tex0/2 outra), ambas escaladas (939x528 para 1408x792 do jogo). Suspeitas: escala da leitura de
+   profundidade, ou ler o anexo de profundidade em uso. A/B: `play-noscale.bat` (EOWRECOMP_NO_SCALE). `play.bat`
+   agora grava o GLSL (`build/glsl`) para a próxima captura. A fenda vertical do mundo aberto está certa.
+7. Dois compute shaders da cidade com instrução desconhecida `3b7707e061172a0f` (72a4711000, 72a4715000), além do
+   SUST.
 4. Na 1ª entrada numa área: **caixas pretas** (destrutíveis) e uma **escada que demorou a aparecer**. Causa provável
    (medida no log do relançamento): draws **pulados enquanto o programa/pipeline compila** (`skipped: program
    compiling` / `pipeline compiling` em 51 janelas de 2 s, 493 programas pendentes de uma vez). Agravado porque o
@@ -106,7 +120,7 @@ que o vertex shader lê na draw (streams, índices, layout dos atributos, cbufs 
 <vs.glsl> [--trace N] [--far X]` compila o GLSL traduzido (`EOWRECOMP_SAVE_MSL=1`) como C++ e roda cada vértice:
 posições de clip, vértices fora da vista, registradores após cada instrução. Precisa de `build/zig-full/zig`.
 PRs upstream abertos: #32 (ritmo de quadros), #33 (vídeo do título), #34 (build Windows), #35 (LDC.64), #36 (cache
-de pipelines salvo em segundo plano), #37 (tabelas de saltos), #38 (RGB565).
+de pipelines salvo em segundo plano), #37 (tabelas de saltos), #38 (RGB565), #39 (labels do BRX).
 
 ### Como rodar no Windows (dev)
 `C:\EoW\run\`: `build/win/dist/EoWRecomp/*` + `extracted/exefs` + `extracted/romfs.src`. `test.bat` (silencioso,
