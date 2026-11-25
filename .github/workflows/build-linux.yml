@@ -1,0 +1,36 @@
+name: Build Linux AppImage
+
+# The Linux x86_64 AppImage alone (the linux job of release.yml), on demand: an artifact to download, no release.
+# tools/linux/appimage.sh builds it in an Ubuntu 22.04 container (glibc 2.35+). No game code or files inside.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install podman
+        run: |
+          if ! command -v podman >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends podman
+          fi
+
+      - name: Build Linux x86_64 AppImage
+        run: |
+          chmod +x tools/linux/*.sh tools/fetch_zig.sh
+          tools/linux/appimage.sh x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EoWRecomp-linux-x64
+          path: build/dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 3
