@@ -1,65 +1,98 @@
-# EoWRecomp
-
 <p align="center">
   <img src="docs/icon/icon_1024.png" width="128" alt="EoWRecomp icon">
 </p>
 
-<h1 align="center">EoWRecomp</h1>
+<h1 align="center">EoWRecomp - Windows / NVIDIA fork</h1>
 
 <p align="center">
   <b>Static recompilation of <i>The Legend of Zelda: Echoes of Wisdom</i> (Nintendo Switch, 2024)</b><br>
-  <b>Current development focus: Linux x86-64 + Vulkan</b>
+  <b>This fork: Windows 11 + NVIDIA (Vulkan) testing and fixes</b>
 </p>
 
 <p align="center">
-  <img alt="status" src="https://img.shields.io/badge/status-v0.5.0-orange">
-  <img alt="platform" src="https://img.shields.io/badge/target-Linux%20x86--64-blue">
+  <img alt="status" src="https://img.shields.io/badge/status-playable%20(early)-orange">
+  <img alt="platform" src="https://img.shields.io/badge/tested-Windows%2011%20x64-blue">
+  <img alt="gpu" src="https://img.shields.io/badge/GPU-NVIDIA%20RTX%203070-76b900">
   <img alt="graphics" src="https://img.shields.io/badge/graphics-Vulkan-red">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
 </p>
 
 ---
 
-EoWRecomp translates the game's ARM64 machine code into C ahead of time and recompiles it for the host PC. Its runtime replaces the Switch operating-system services used by the game and implements the NVN graphics API on top of Vulkan. This fork is built from [requiemjota88/EoWRecomp](https://github.com/requiemjota88/EoWRecomp) (`beta 1`) with backported improvements from [tcsenpai/EoWRecomp](https://github.com/tcsenpai/EoWRecomp) and [LAS Recomp](https://github.com/peiikai/LASRecomp), plus Linux-specific fixes.
+EoWRecomp translates the game's ARM64 machine code into C ahead of time and recompiles it for the PC. Its runtime
+replaces the Switch operating-system services the game uses and implements the NVN graphics API on top of Vulkan.
 
-> [!IMPORTANT]
-> **Linux x86-64 (Vulkan) is the active tested target in this fork.** Windows, macOS, and Android builds inherited from upstream are not tested here.
+This fork follows **[patrickksmdev/EoWRecomp](https://github.com/patrickksmdev/EoWRecomp)** (developed and tested on
+Linux, playable to the Gerudo Desert) and tests it on **Windows 11 with an NVIDIA RTX 3070 Laptop GPU**. Our changes are
+offered back to that project in
+[patrickksmdev/EoWRecomp#1](https://github.com/patrickksmdev/EoWRecomp/pull/1); the work branch is
+[`win-on-patrick`](https://github.com/shkankin/EoWRecomp/tree/win-on-patrick).
 
 > [!WARNING]
-> **No game files are included.** You must provide your own legally obtained copy of *The Legend of Zelda: Echoes of Wisdom* v1.0.0 (title ID `01008CF01BAAC000`) and your own `prod.keys`. The repository does not provide game files, keys, or instructions for obtaining them.
+> **No game files are included.** You need your own legally obtained copy of *The Legend of Zelda: Echoes of Wisdom*
+> v1.0.0 (title ID `01008CF01BAAC000`) and your own `prod.keys`. This repository does not provide game files, keys, or
+> instructions for obtaining them.
 
-## Linux progress (`v0.5.0`)
+## Screenshots (Windows 11, RTX 3070 Laptop, 1280x720)
 
-- **Most of the overworld explored smoothly + playable through the 2nd dungeon (Gerudo Desert):** intro, Hyrule Castle Town, Suthorn Village, Still World (Rifts), 2D sections, first dungeon, and Gerudo Desert dungeon with audio, working save/load, and zero freezes.
-- **Ahead-of-time shader preparation (`shader_prep`):** pre-translates and compiles 1,173+ known shader variants from your own game files on the start screen (plus automatic `cache/shader_seen.txt` for newly encountered variants), with `Sync` shader mode enabled by default for zero pop-in.
-- **Dynamic cubemap / IBL lighting fix:** fixed image-slot `TXQ` lookups (`stage_tex_handle()`) and compute `rscale` in `runtime/nvn/vulkan/exec.c`, restoring ambient lighting and metallic reflections across zone transitions (e.g., Hyrule Castle courtyard).
-- **Placed-memory guest heap (`VK_EXT_map_memory_placed`) & CPU draw optimizations:** maps host-cached GTT memory directly at `HEAP_BASE` (eliminating per-submit `amdgpu` userptr overhead on Linux RADV, `~50x` faster `vkQueueSubmit2`), plus cached `stencil_slots()` masks, gated debug checks in `draw_()`, and `gw_hit()` bounding-box fast-reject + completed-sequence cache (**~66 FPS → 91–116 FPS** in open areas; **46–50 FPS → 99.8–120 FPS** in heavy draw areas on RX 7600).
-- **Rift / Void rendering fix:** submission-tracked GPU-written buffer lifetimes (`gw_tab`, ported from `tcsenpai/EoWRecomp`) fix visual glitches after exiting Rift areas without address-specific workarounds.
-- **Kernel condvar & watchdog fixes:** fixed `svc_wait_process_wide_key()` lost wake-up, `block_current()` `TimedWait` vs `Signal` race, atomic CAS arbiter updates in `runtime/kernel.c`, and duplicate Linux watchdog registration (**0 `unstick`** in 272 s+ sessions).
-- **GPU-side indirect draws (`vkCmdDrawIndirect` / `vkCmdDrawIndexedIndirect`):** eliminated mid-frame CPU flush stalls and added live tracking for GPU-written constant buffers.
-- **Smart shader compilation & pre-warming:** pre-warms shaders on `nvnProgramSetShaders` using the active window origin/depth mode and waits synchronously on critical fullscreen/compute passes (`Smart` / `Sync` / `Async` selectable in the `F1` menu), eliminating lighting/scene flicker.
-- **VSync & FPS limit:** toggle VSync and cap FPS (`30` / `60` / `120` / `Unlimited`) from the `F1` → **Display** menu.
-- **XCI extraction & AppImage:** HFS0 `.xci` support in `tools/nca_extract.py` and standalone x86-64 AppImages (`build/dist/EoWRecomp-v0.5.0-linux-x86_64.AppImage`).
+Frames captured by the runtime itself from the recompiled game.
 
-### Known issues
-- **Map screen >120 FPS:** keep `FPS limit` at `60` or `120` (running at `144+` fps currently inverts the analog stick on the map screen).
-- **Untested platforms:** Windows, macOS, and Android builds are inherited from upstream and untested in this fork (automated Windows x64 builds are generated via GitHub Actions).
+| | |
+|:-:|:-:|
+| ![Prologue](docs/screenshots/win_01_prologue.jpg) | ![A rift in Suthorn Ruins](docs/screenshots/win_02_rift.jpg) |
+| Prologue | A rift in the Suthorn Ruins floor |
+| ![The swordsman's cloak](docs/screenshots/win_03_cloak.jpg) | ![At the edge of the void](docs/screenshots/win_04_void.jpg) |
+| "You got the swordsman's cloak!" | At the edge of the void |
+| ![Link before the fight](docs/screenshots/win_05_ganon_cutscene.jpg) | ![Ganon](docs/screenshots/win_06_ganon.jpg) |
+| Prologue cutscene | Ganon |
+| ![Ganon fight](docs/screenshots/win_07_ganon_fight.jpg) | |
+| The Ganon fight | |
 
-## Running & Building on Linux
+## Windows status (2026-11-24)
 
-### AppImage (recommended)
-Download the latest AppImage from [Releases](https://github.com/patrickksmdev/EoWRecomp/releases):
+What has been seen working on Windows 11 / RTX 3070 Laptop:
+
+- **Boot, new game and saves:** the prologue from an empty save; existing saves list and load.
+- **60 fps** with the built-in frame limiter (`F1` -> Video), through the prologue, the Ganon fight, Suthorn Ruins
+  and past the title card. Played by hand with real saves: no problems besides the first-time shader hitches below.
+- **Rifts / the void render correctly**, including the floor rifts that an older Windows build drew wrong.
+
+Fixed in this fork (each verified by repeated scripted runs; details in [docs/STATUS.md](docs/STATUS.md), Portuguese):
+
+- **NVIDIA device loss after Zelda gets the swordsman's cloak** (`VK_ERROR_DEVICE_LOST`, about 1 run in 4-6). A depth
+  snapshot was reused after the game had rebuilt that texture at another size or format, so the rift shader read memory
+  that didn't exist. 8 of 16 runs crashed before the fix, 0 of 16 after.
+- **Stutter every 30 s** while new graphics appeared: the ~100 MB pipeline cache was written to disk on the render
+  thread. It is saved in the background now.
+- **Shader preparation without the start screen:** `EOWRECOMP_SHADER_PREP=1` now pre-compiles the known shaders when the
+  game is started directly (`--play` / `EOWRECOMP_NO_LAUNCHER=1`). The start screen always does it.
+- **Windows build fixes:** the game library's link no longer overwrites the runtime's import library; POSIX `rename`
+  semantics.
+- **Debug tools:** `EOWRECOMP_VK_CHECKPOINTS=1` (NVIDIA: names the draw a GPU crash happened in), vertex shader input
+  dump + CPU emulator (`EOWRECOMP_VS_DUMP`, `tools/vsemu.py`), `EOWRECOMP_DUMP_SHADERS`, `--romfs-src` for
+  `tools/nca_extract.py`.
+
+### Known issues on Windows
+
+- **Hitches the first time new graphics appear**: the NVIDIA driver takes 0.1-0.6 s to build some full-screen shaders the
+  first time. `F1` -> Video -> **Shader compilation** decides what happens meanwhile: `Sync` (default) waits - no
+  glitches, but stalls of up to ~2 s on a fresh install; `Async` never waits - smooth (worst ~0.2 s measured), at the
+  cost of a one-frame flash the first time a big effect appears; `Smart` is in between. Once the shader cache (`cache/`)
+  has them, all three play about the same. We use **Async** on the test laptop.
+- **Audio** is not verified yet (the test machine has no sound output).
+- Only one Windows machine (NVIDIA) has been tested; AMD / Intel GPUs on Windows are untested.
+
+## Building for Windows
+
+Cross-built from Linux / WSL with zig cc: run `tools/windows/fetch_deps.sh` once, then
+
 ```bash
-chmod +x EoWRecomp-v0.5.0-linux-x86_64.AppImage
-./EoWRecomp-v0.5.0-linux-x86_64.AppImage
+tools/windows/build.sh -j16    # -> build/win/dist/EoWRecomp/ (eowrecomp.exe, eowgame.dll and the DLLs)
 ```
-On first launch, select the folder containing your `.nsp`/`.xci` and `prod.keys`. The launcher will extract ExeFS and compile `eowgame.so` locally.
 
-### Building from source
-See [docs/linux.md](docs/linux.md) and [docs/STATUS.md](docs/STATUS.md) for dependencies, or build the AppImage with `podman`:
-```bash
-tools/linux/appimage.sh x86_64
-```
+See the header of `tools/windows/build.sh` and [docs/BUILD-windows.md](docs/BUILD-windows.md) (native MSYS2 build).
+The game code (`generated/`) is made from your own game files with `tools/nca_extract.py` and `make gen`; it is never
+committed.
 
 ## How it works
 
@@ -87,13 +120,14 @@ See **[docs/STATUS.md](docs/STATUS.md)** for the detailed technical log:
 ## Credits
 
 - **[EoWRecomp original project](https://github.com/Nycolazs/EoWRecomp)** by **Nycolazs** — original project and foundation.
-- **[requiemjota88/EoWRecomp](https://github.com/requiemjota88/EoWRecomp)** — `beta 1` base used for this fork (GPU culling, stencil views, watchdog).
+- **[patrickksmdev/EoWRecomp](https://github.com/patrickksmdev/EoWRecomp)** by **Patrick** — the Linux tree this fork follows (shader preparation, frame limiter, rift fixes and much more).
+- **[requiemjota88/EoWRecomp](https://github.com/requiemjota88/EoWRecomp)** — `beta 1` base of patrickksmdev's tree (GPU culling, stencil views, watchdog).
 - **[tcsenpai/EoWRecomp](https://github.com/tcsenpai/EoWRecomp)** — backported `gen.py` jump-table, frame-pacing, pipeline cache, and storing-fs fixes.
 - **[LAS Recomp](https://github.com/peiikai/LASRecomp)** by Peiikai and contributors — the foundation for the recompiler, runtime, NVN implementation, Maxwell shader translator and Vulkan renderer.
 - [SDL 3](https://libsdl.org), [FFmpeg](https://ffmpeg.org), [Dear ImGui](https://github.com/ocornut/imgui), [Vulkan](https://www.vulkan.org), [volk](https://github.com/zeux/volk), [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator), [shaderc](https://github.com/google/shaderc), [SMAA](https://github.com/iryoku/smaa) and [AMD FidelityFX FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR).
 - Documentation and research references: [Switchbrew](https://switchbrew.org), [envytools](https://github.com/envytools/envytools), and the instruction decoders of Ryujinx and yuzu.
 
-This fork is developed with AI assistance from [Gemini](https://gemini.google.com) (Google), under human direction and testing (upstream base was developed with Claude).
+patrickksmdev's tree is developed with AI assistance from [Gemini](https://gemini.google.com) (Google); the Windows work in this fork is done with [Claude Code](https://claude.com/claude-code) (Anthropic), under human direction and testing.
 
 ## Legal
 
