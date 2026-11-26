@@ -4,6 +4,11 @@
 //   header_key) -> section (AES-CTR, key from the key area or the title key) -> hash layers -> [CompressedStorage]
 //   -> PFS0 (ExeFS) / RomFS.
 // Hashes are not verified (the files are the player's own dump; a bad one shows up as a game error).
+// An update (patch NSP: title id | 0x800) replaces the ExeFS and layers its RomFS over the base game's: the patch
+// section's IndirectStorage (BucketTree of {virt, phys, storage}) maps each range of the patched section to the base
+// program's RomFS section (storage 0) or to the patch's own data (storage 1), which is AES-CTR with a per-range
+// counter generation (AesCtrCounterExtendedStorage). Both mappings are at the raw section level, under the hash
+// layers and the CompressedStorage, which the patch's own fs header describes (Atmosphere's NcaFileSystemDriver).
 #include "nxpkg.h"
 
 #include <errno.h>
@@ -375,20 +380,58 @@ static bool section_info(const Nca *nca, int i, Section *s) {
 }
 
 // decrypted bytes [off, off+n) of a section (off relative to the section)
-static bool section_read(int fd, uint64_t nca_base, const Section *s, const uint8_t key[16], uint8_t *dst, uint64_t off,
-                         size_t n) {
+// gen >= 0: an AesCtrEx range's counter generation in place of the section's (the IV's second word)
+static bool section_read_gen(int fd, uint64_t nca_base, const Section *s, const uint8_t key[16], uint8_t *dst,
+                             uint64_t off, size_t n, int64_t gen) {
     uint64_t a = off & ~15ull, pre = off - a;
     if (s->enc_type == 1) return pread_all(fd, dst, n, nca_base + s->off + off);
-    if (s->enc_type != 3) return false;
+    if (s->enc_type != 3 && s->enc_type != 4) return false;
     uint8_t *tmp = pre ? malloc(n + pre) : dst;
     if (!pread_all(fd, tmp, n + pre, nca_base + s->off + a)) { if (pre) free(tmp); return false; }
     uint8_t iv[16];
     memcpy(iv, s->ctr_hi, 8);
+    if (gen >= 0) for (int k = 0; k < 4; k++) iv[7 - k] = (uint8_t)((uint64_t)gen >> (8 * k));
     uint64_t blk = (s->off + a) >> 4;
     for (int k = 0; k < 8; k++) iv[15 - k] = (uint8_t)(blk >> (8 * k));
     nx_aes128_ctr(key, iv, tmp, n + pre);
     if (pre) memcpy(dst, tmp + pre, n), free(tmp);
     return true;
+}
+
+static bool section_read(int fd, uint64_t nca_base, const Section *s, const uint8_t key[16], uint8_t *dst, uint64_t off,
+                         size_t n) {
+    return section_read_gen(fd, nca_base, s, key, dst, off, n, -1);
+}
+
+// ------------------------------------------------------------------ BucketTree
+// A table of `count` entries of `esize` bytes in 0x4000-byte nodes: the L1 node (and L2 nodes when the entry sets
+// don't fit one) then the entry sets, each a {s32 index; s32 count; s64 end} header and its entries. Returns the
+// entries in a row (count of them) and the end of the last one (end).
+static uint8_t *bucket_entries(const uint8_t *table, uint64_t table_size, const uint8_t hdr[16], uint64_t esize,
+                               int32_t *count_out, int64_t *end, char *why, size_t why_size) {
+    const uint64_t NODE = 0x4000;
+    int32_t count;
+    if (memcmp(hdr, "BKTR", 4)) return WHY("bad table header"), NULL;
+    memcpy(&count, hdr + 8, 4);
+    if (count < 0) return WHY("bad table header"), NULL;
+    uint64_t per_set = (NODE - 0x10) / esize, sets = (count + per_set - 1) / per_set, per_node = (NODE - 0x10) / 8;
+    uint64_t l2 = sets <= per_node ? 0 : (sets - per_node + per_node - 2) / (per_node - 1);
+    uint64_t node_storage = (1 + l2) * NODE;
+    uint8_t *out = malloc((size_t)count * esize + 1);
+    int32_t got = 0;
+    *end = 0;
+    for (uint64_t st = 0; st < sets; st++) {
+        uint64_t b = node_storage + st * NODE;
+        if (b + NODE > table_size) { free(out); return WHY("table cut short"), NULL; }
+        int32_t idx, n;
+        memcpy(&idx, table + b, 4), memcpy(&n, table + b + 4, 4), memcpy(end, table + b + 8, 8);
+        if ((uint64_t)idx != st || n < 0 || (uint64_t)n > per_set || got + n > count) { free(out); return WHY("bad table"), NULL; }
+        memcpy(out + (size_t)got * esize, table + b + 0x10, (size_t)n * esize);
+        got += n;
+    }
+    if (got != count) { free(out); return WHY("table: %d entries of %d", got, count), NULL; }
+    *count_out = count;
+    return out;
 }
 
 // ------------------------------------------------------------------ CompressedStorage
@@ -398,11 +441,26 @@ typedef struct { int64_t virt, phys; uint8_t type; uint32_t psize; } CEntry;
 typedef struct { uint8_t *data; uint64_t entry; uint32_t len; uint64_t stamp; } CBlock;
 #define NCACHE 16
 
+typedef struct { int64_t virt, phys; int32_t storage; } IEntry;  // IndirectStorage::Entry
+typedef struct { int64_t off; int32_t gen; } XEntry;                // AesCtrCounterExtendedStorage::Entry
+
 struct NxRomfs {
     int fd;
     uint64_t nca_base;
-    Section sec;
+    Section sec;  // the RomFS section (with an update: the base program's; data / comp: the patch's)
     uint8_t key[16];
+    // an update: the patch's RomFS section and its two tables (patched section offset -> base / patch data)
+    bool patched;
+    int pfd;
+    uint64_t pnca_base;
+    Section psec;
+    uint8_t pkey[16];
+    uint64_t ind_off, ind_size, x_off, x_size;
+    uint8_t ind_hdr[16], x_hdr[16];
+    IEntry *ind;  // (+ a sentinel: virt = the patched section's size)
+    int32_t nind;
+    XEntry *xe;   // (+ a sentinel: off = the end of the patch data)
+    int32_t nx;
     uint64_t size;  // the RomFS image's
     CEntry *ent;
     uint64_t nent;
@@ -411,37 +469,100 @@ struct NxRomfs {
     uint64_t stamp;
 };
 
+// the patch's own data (storage 1): each AesCtrEx range with its counter generation
+static bool patch_data_read(NxRomfs *r, uint8_t *dst, uint64_t off, uint64_t n) {
+    int32_t lo = 0, hi = r->nx;  // last range with off <= off
+    while (hi - lo > 1) {
+        int32_t mid = (lo + hi) / 2;
+        if ((uint64_t)r->xe[mid].off <= off) lo = mid;
+        else hi = mid;
+    }
+    for (int32_t i = lo; n && i < r->nx; i++) {
+        uint64_t e = (uint64_t)r->xe[i + 1].off;
+        if (off >= e) continue;
+        uint64_t k = e - off < n ? e - off : n;
+        if (!section_read_gen(r->pfd, r->pnca_base, &r->psec, r->pkey, dst, off, k, r->xe[i].gen)) return false;
+        dst += k, off += k, n -= k;
+    }
+    return n == 0;
+}
+
+// bytes of the RomFS section (relative to its start): the package's, or with an update the patched section's
+static bool img_read(NxRomfs *r, uint8_t *dst, uint64_t off, uint64_t n) {
+    if (!r->patched) return section_read(r->fd, r->nca_base, &r->sec, r->key, dst, off, n);
+    int32_t lo = 0, hi = r->nind;
+    while (hi - lo > 1) {
+        int32_t mid = (lo + hi) / 2;
+        if ((uint64_t)r->ind[mid].virt <= off) lo = mid;
+        else hi = mid;
+    }
+    for (int32_t i = lo; n && i < r->nind; i++) {
+        const IEntry *e = &r->ind[i];
+        uint64_t v = (uint64_t)e->virt, ve = (uint64_t)r->ind[i + 1].virt;
+        if (off >= ve) continue;
+        uint64_t k = ve - off < n ? ve - off : n, p = (uint64_t)e->phys + (off - v);
+        bool ok = e->storage == 0 ? section_read(r->fd, r->nca_base, &r->sec, r->key, dst, p, k)
+                : e->storage == 1 ? patch_data_read(r, dst, p, k) : false;
+        if (!ok) return false;
+        dst += k, off += k, n -= k;
+    }
+    return n == 0;
+}
+
+// the update's two tables (plain AES-CTR in the patch section, after its data)
+static bool patch_load(NxRomfs *r, char *why, size_t why_size) {
+    int64_t end;
+    uint8_t *t = malloc(r->ind_size + 1);
+    if (!section_read(r->pfd, r->pnca_base, &r->psec, r->pkey, t, r->ind_off, r->ind_size)) {
+        free(t);
+        return WHY("can't read the update's data table (update package cut short?)");
+    }
+    uint8_t *raw = bucket_entries(t, r->ind_size, r->ind_hdr, 0x14, &r->nind, &end, why, why_size);
+    free(t);
+    if (!raw) return false;
+    r->ind = calloc((size_t)r->nind + 1, sizeof *r->ind);
+    for (int32_t i = 0; i < r->nind; i++) {
+        const uint8_t *e = raw + i * 0x14;
+        memcpy(&r->ind[i].virt, e, 8), memcpy(&r->ind[i].phys, e + 8, 8), memcpy(&r->ind[i].storage, e + 16, 4);
+    }
+    free(raw);
+    r->ind[r->nind].virt = end;
+    t = malloc(r->x_size + 1);
+    if (!section_read(r->pfd, r->pnca_base, &r->psec, r->pkey, t, r->x_off, r->x_size)) {
+        free(t);
+        return WHY("can't read the update's encryption table (update package cut short?)");
+    }
+    raw = bucket_entries(t, r->x_size, r->x_hdr, 0x10, &r->nx, &end, why, why_size);
+    free(t);
+    if (!raw) return false;
+    r->xe = calloc((size_t)r->nx + 1, sizeof *r->xe);
+    for (int32_t i = 0; i < r->nx; i++) memcpy(&r->xe[i].off, raw + i * 0x10, 8), memcpy(&r->xe[i].gen, raw + i * 0x10 + 12, 4);
+    free(raw);
+    r->xe[r->nx].off = end;
+    if (!r->nind || !r->nx) return WHY("empty update tables");
+    return true;
+}
+
 static bool comp_load(NxRomfs *r, char *why, size_t why_size) {
-    const uint8_t *h = r->sec.comp_hdr;
-    if (memcmp(h, "BKTR", 4)) return WHY("bad compression table header");
-    int32_t count;
-    memcpy(&count, h + 8, 4);
-    const uint64_t NODE = 0x4000, ENTRY = 0x18;
-    uint8_t *table = malloc(r->sec.comp_size);
-    if (!section_read(r->fd, r->nca_base, &r->sec, r->key, table, r->sec.data_off + r->sec.comp_off, r->sec.comp_size)) {
+    uint8_t *table = malloc(r->sec.comp_size + 1);
+    if (!img_read(r, table, r->sec.data_off + r->sec.comp_off, r->sec.comp_size)) {
         free(table);
         return WHY("can't read the compression table (package cut short?)");
     }
-    uint64_t per_set = (NODE - 0x10) / ENTRY, sets = (count + per_set - 1) / per_set, per_node = (NODE - 0x10) / 8;
-    uint64_t l2 = sets <= per_node ? 0 : (sets - per_node + per_node - 2) / (per_node - 1);
-    uint64_t node_storage = (1 + l2) * NODE;
-    r->ent = calloc((size_t)count + 1, sizeof *r->ent);
-    r->nent = 0;
-    int64_t end = 0;
-    for (uint64_t s = 0; s < sets; s++) {
-        uint64_t b = node_storage + s * NODE;
-        if (b + NODE > r->sec.comp_size) { free(table); return WHY("compression table cut short"); }
-        int32_t idx, n;
-        memcpy(&idx, table + b, 4), memcpy(&n, table + b + 4, 4), memcpy(&end, table + b + 8, 8);
-        if ((uint64_t)idx != s || n < 0 || (uint64_t)n > per_set) { free(table); return WHY("bad compression table"); }
-        for (int e = 0; e < n && r->nent < (uint64_t)count; e++) {
-            const uint8_t *p = table + b + 0x10 + e * ENTRY;
-            CEntry *c = &r->ent[r->nent++];
-            memcpy(&c->virt, p, 8), memcpy(&c->phys, p + 8, 8), c->type = p[16], memcpy(&c->psize, p + 20, 4);
-        }
-    }
+    int32_t count;
+    int64_t end;
+    char sub[128];
+    uint8_t *raw = bucket_entries(table, r->sec.comp_size, r->sec.comp_hdr, 0x18, &count, &end, sub, sizeof sub);
     free(table);
-    if (r->nent != (uint64_t)count) return WHY("compression table: %llu entries of %d", (unsigned long long)r->nent, count);
+    if (!raw) return WHY("compression %s", sub);
+    r->ent = calloc((size_t)count + 1, sizeof *r->ent);
+    for (int32_t e = 0; e < count; e++) {
+        const uint8_t *p = raw + e * 0x18;
+        CEntry *c = &r->ent[e];
+        memcpy(&c->virt, p, 8), memcpy(&c->phys, p + 8, 8), c->type = p[16], memcpy(&c->psize, p + 20, 4);
+    }
+    free(raw);
+    r->nent = (uint64_t)count;
     r->ent[r->nent].virt = end;  // (the sentinel: the end of the last entry)
     r->size = (uint64_t)end;
     return true;
@@ -458,7 +579,7 @@ static const uint8_t *comp_block(NxRomfs *r, uint64_t i, uint32_t *len) {
     const CEntry *e = &r->ent[i];
     uint32_t vlen = (uint32_t)(r->ent[i + 1].virt - e->virt);
     uint8_t *raw = malloc(e->psize ? e->psize : 1), *out = malloc(vlen ? vlen : 1);
-    if (!section_read(r->fd, r->nca_base, &r->sec, r->key, raw, r->sec.data_off + (uint64_t)e->phys, e->psize) ||
+    if (!img_read(r, raw, r->sec.data_off + (uint64_t)e->phys, e->psize) ||
         nx_lz4_decompress(raw, (int)e->psize, out, (int)vlen) != (int)vlen) {
         free(raw), free(out);
         return NULL;
@@ -475,7 +596,7 @@ ssize_t nx_romfs_pread(NxRomfs *r, void *dst_, uint64_t size, uint64_t off) {
     if (off >= r->size) return 0;
     if (size > r->size - off) size = r->size - off;
     if (!r->ent)
-        return section_read(r->fd, r->nca_base, &r->sec, r->key, dst, r->sec.data_off + off, size) ? (ssize_t)size : -1;
+        return img_read(r, dst, r->sec.data_off + off, size) ? (ssize_t)size : -1;
     pthread_mutex_lock(&r->lock);
     uint64_t lo = 0, hi = r->nent;  // last entry with virt <= off
     while (hi - lo > 1) {
@@ -490,8 +611,7 @@ ssize_t nx_romfs_pread(NxRomfs *r, void *dst_, uint64_t size, uint64_t off) {
         uint64_t v = (uint64_t)e->virt, vend = (uint64_t)r->ent[i + 1].virt, o = off + done;
         if (o >= vend) continue;
         uint64_t n = vend - o < size - done ? vend - o : size - done;
-        if (e->type == 0) ok = section_read(r->fd, r->nca_base, &r->sec, r->key, dst + done,
-                                            r->sec.data_off + (uint64_t)e->phys + (o - v), n);
+        if (e->type == 0) ok = img_read(r, dst + done, r->sec.data_off + (uint64_t)e->phys + (o - v), n);
         else if (e->type == 1) memset(dst + done, 0, n);
         else if (e->type == 3) {
             uint32_t len;
@@ -511,7 +631,9 @@ void nx_romfs_close(NxRomfs *r) {
     if (!r) return;
     for (int k = 0; k < NCACHE; k++) free(r->cache[k].data);
     free(r->ent);
+    free(r->ind), free(r->xe);
     if (r->fd >= 0) close(r->fd);
+    if (r->pfd >= 0) close(r->pfd);
     pthread_mutex_destroy(&r->lock);
     free(r);
 }
@@ -519,6 +641,8 @@ void nx_romfs_close(NxRomfs *r) {
 // ------------------------------------------------------------------ romfs.src
 // One "name=value" per line: package (path), size (its size in bytes: a changed file is refused), nca (the program
 // NCA's offset in it), section (offset, size, enc, ctr_hi), key, data (offset, size), comp (offset, size, header).
+// With an update, the base program's lines and: patch_package, patch_size, patch_nca, patch_section, patch_key,
+// indirect and ctrex (each offset, size, header: the two tables in the patch section); data and comp are the patch's.
 static void hex(char *out, const uint8_t *b, int n) {
     for (int i = 0; i < n; i++) sprintf(out + 2 * i, "%02x", b[i]);
 }
@@ -527,15 +651,24 @@ NxRomfs *nx_romfs_open(const char *src_path, char *why, size_t why_size) {
     FILE *f = fopen(src_path, "r");
     if (!f) { snprintf(why, why_size, "no %s", src_path); return NULL; }
     NxRomfs *r = calloc(1, sizeof *r);
-    r->fd = -1;
+    r->fd = r->pfd = -1;
     pthread_mutex_init(&r->lock, NULL);
-    char line[2048], package[1800] = "";
-    unsigned long long pkg_size = 0, a, b;
+    char line[2048], package[1800] = "", ppackage[1800] = "";
+    unsigned long long pkg_size = 0, ppkg_size = 0, a, b;
     unsigned enc;
     char h1[64], h2[64];
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         if (!strncmp(line, "package=", 8)) snprintf(package, sizeof package, "%s", line + 8);
+        else if (!strncmp(line, "patch_package=", 14)) snprintf(ppackage, sizeof ppackage, "%s", line + 14);
+        else if (sscanf(line, "patch_size=%llu", &a) == 1) ppkg_size = a;
+        else if (sscanf(line, "patch_nca=%llu", &a) == 1) r->pnca_base = a;
+        else if (sscanf(line, "patch_section=%llu %llu %u %63s", &a, &b, &enc, h1) == 4)
+            r->psec.off = a, r->psec.size = b, r->psec.enc_type = (uint8_t)enc, unhex(h1, r->psec.ctr_hi, 8);
+        else if (sscanf(line, "patch_key=%63s", h1) == 1) unhex(h1, r->pkey, 16);
+        else if (sscanf(line, "indirect=%llu %llu %63s", &a, &b, h2) == 3)
+            r->ind_off = a, r->ind_size = b, unhex(h2, r->ind_hdr, 16);
+        else if (sscanf(line, "ctrex=%llu %llu %63s", &a, &b, h2) == 3) r->x_off = a, r->x_size = b, unhex(h2, r->x_hdr, 16);
         else if (sscanf(line, "size=%llu", &a) == 1) pkg_size = a;
         else if (sscanf(line, "nca=%llu", &a) == 1) r->nca_base = a;
         else if (sscanf(line, "section=%llu %llu %u %63s", &a, &b, &enc, h1) == 4)
@@ -552,6 +685,16 @@ NxRomfs *nx_romfs_open(const char *src_path, char *why, size_t why_size) {
         snprintf(why, why_size, "the game package moved or changed (%s)", package);
         nx_romfs_close(r);
         return NULL;
+    }
+    if (ppackage[0]) {
+        r->patched = true;
+        r->pfd = open_package(ppackage);
+        if (r->pfd < 0 || fstat(r->pfd, &sb) || (unsigned long long)sb.st_size != ppkg_size) {
+            snprintf(why, why_size, "the game update moved or changed (%s)", ppackage);
+            nx_romfs_close(r);
+            return NULL;
+        }
+        if (!patch_load(r, why, why_size)) { nx_romfs_close(r); return NULL; }
     }
     r->size = r->sec.data_size;
     if (r->sec.comp_size && !comp_load(r, why, why_size)) { nx_romfs_close(r); return NULL; }
@@ -609,126 +752,210 @@ static bool write_file(const char *path, int fd, uint64_t nca_base, const Sectio
     return fclose(f) == 0 && ok;
 }
 
+// The package's program NCA, opened: its files (NSP / XCI secure partition), header and section key. fd: the package.
+static bool open_program(const char *package, const Keys *ks, const char *keys_path, int *fd_out, struct stat *sb,
+                         Entries *files, Nca *nca, char *why, size_t why_size) {
+    int fd = *fd_out = open_package(package);
+    if (fd < 0 || fstat(fd, sb)) return WHY("can't open the game package");
+    uint8_t head[0x200];
+    if (!pread_all(fd, head, sizeof head, 0)) return WHY("the game package is too small");
+    if (!memcmp(head, "PFS0", 4)) {  // NSP
+        if (!read_fs0(fd, 0, files)) return WHY("bad NSP");
+    } else if (!memcmp(head + 0x100, "HEAD", 4)) {  // XCI: the root HFS0's "secure" partition
+        uint64_t root;
+        memcpy(&root, head + 0x130, 8);
+        Entries parts = {0};
+        if (!read_fs0(fd, root, &parts)) return WHY("bad XCI");
+        for (int i = 0; i < parts.n; i++)
+            if (!strcmp(parts.e[i].name, "secure")) read_fs0(fd, parts.e[i].off, files);
+        free(parts.e);
+        if (!files->n) return WHY("XCI without a secure partition");
+    } else {
+        entries_add(files, "program.nca", 0, (uint64_t)sb->st_size);  // a bare NCA
+    }
+    for (int i = 0; i < files->n; i++)
+        if (files->e[i].off + files->e[i].size > (uint64_t)sb->st_size)
+            return WHY("the game package is incomplete (%llu MB missing): copy it again",
+                       (unsigned long long)((files->e[i].off + files->e[i].size - (uint64_t)sb->st_size) >> 20));
+    bool found = false, any_nca = false;
+    for (int i = 0; i < files->n && !found; i++) {
+        size_t l = strlen(files->e[i].name);
+        if (l < 4 || strcmp(files->e[i].name + l - 4, ".nca")) continue;
+        if (!nca_header(fd, files->e[i].off, ks, nca)) continue;
+        any_nca = true;
+        found = nca->hdr[0x205] == 0;  // content type: program
+    }
+    if (!found) return WHY(any_nca ? "no game program in the package" : "can't decrypt the package (wrong or old keys?)");
+    int gen = nca->hdr[0x206] > nca->hdr[0x220] ? nca->hdr[0x206] : nca->hdr[0x220];
+    int keygen = gen ? gen - 1 : 0;
+    static const uint8_t zero[16];
+    if (memcmp(nca->hdr + 0x230, zero, 16)) {
+        if (!title_key(nca, fd, files, ks, keys_path, keygen, nca->ctr_key))
+            return WHY("the package needs a title key (no ticket in it, none in title.keys)");
+    } else {
+        char kn[48];
+        snprintf(kn, sizeof kn, "key_area_key_application_%02x", keygen);
+        const uint8_t *kaek = key_get(ks, kn, 16);
+        if (!kaek) return WHY("the keys file has no %s (keys from an older system?)", kn);
+        uint8_t area[0x40];
+        memcpy(area, nca->hdr + 0x300, 0x40);
+        nx_aes128_ecb_decrypt(kaek, area, 0x40);
+        memcpy(nca->ctr_key, area + 0x20, 16);  // index 2: AES-CTR
+    }
+    return true;
+}
+
+// ExeFS: a PFS0 of the NSOs and main.npdm, written to <out_dir>/exefs/ (an earlier one's files removed first)
+static bool write_exefs(int fd, const Nca *nca, const Section *exefs, const char *out_dir, char *why, size_t why_size) {
+    uint8_t h[16];
+    if (!section_read(fd, nca->base, exefs, nca->ctr_key, h, exefs->data_off, 16) || memcmp(h, "PFS0", 4))
+        return WHY("can't decrypt the game (wrong keys?)");
+    uint32_t n, strsz;
+    memcpy(&n, h + 4, 4), memcpy(&strsz, h + 8, 4);
+    if (n > 64 || strsz > 0x10000) return WHY("unexpected program layout");
+    size_t meta = 16 + n * 0x18 + strsz;
+    uint8_t *m = malloc(meta + 1);
+    section_read(fd, nca->base, exefs, nca->ctr_key, m, exefs->data_off, meta);
+    m[meta] = 0;
+    char dir[1200];
+    snprintf(dir, sizeof dir, "%s/exefs", out_dir);
+    mkdir(out_dir, 0755), mkdir(dir, 0755);
+    static const char *const old[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0", "subsdk1", "subsdk2", "subsdk3",
+                                      "subsdk4", "subsdk5", "subsdk6", "subsdk7", "subsdk8", "subsdk9"};
+    for (size_t i = 0; i < sizeof old / sizeof *old; i++) {
+        char path[1300];
+        snprintf(path, sizeof path, "%s/%s", dir, old[i]);
+        remove(path);
+    }
+    bool wrote = true;
+    for (uint32_t i = 0; i < n && wrote; i++) {
+        uint64_t off, size;
+        uint32_t no;
+        memcpy(&off, m + 16 + i * 0x18, 8), memcpy(&size, m + 24 + i * 0x18, 8), memcpy(&no, m + 32 + i * 0x18, 4);
+        const char *name = (const char *)m + 16 + n * 0x18 + no;
+        if (no >= strsz || strchr(name, '/') || strchr(name, '\\') || name[0] == '.') continue;
+        char path[1400];
+        snprintf(path, sizeof path, "%s/%.*s", dir, (int)strnlen(name, strsz - no), name);
+        wrote = write_file(path, fd, nca->base, exefs, nca->ctr_key, exefs->data_off + meta + off, size);
+    }
+    free(m);
+    if (!wrote) return WHY("can't write the game code files (disk full?)");
+    return true;
+}
+
+// romfs.src written (through a .tmp), then opened: the compression table and the RomFS header must read back
+static bool write_romfs_src(const char *out_dir, const char *text, char *why, size_t why_size) {
+    char path[1200], tmp[1300];
+    snprintf(path, sizeof path, "%s/romfs.src", out_dir);
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return WHY("can't write %s", path);
+    fputs(text, f);
+    if (fclose(f) || rename(tmp, path)) return WHY("can't write %s", path);
+    NxRomfs *r = nx_romfs_open(path, why, why_size);
+    if (!r) return false;
+    uint64_t hsize = 0;
+    bool ok = nx_romfs_pread(r, &hsize, 8, 0) == 8 && hsize == 0x50;
+    nx_romfs_close(r);
+    if (!ok) return WHY("the game data doesn't decrypt (wrong keys?)");
+    return true;
+}
+
 bool nx_setup(const char *package, const char *keys_path, const char *out_dir, uint64_t *title_id, char *why,
               size_t why_size) {
     Keys ks = {0};
     if (!keys_load(keys_path, &ks)) return WHY("can't read the keys file");
     bool ok = false;
     Entries files = {0};
-    int fd = open_package(package);
+    int fd = -1;
     struct stat sb;
-    if (fd < 0 || fstat(fd, &sb)) { WHY("can't open the game package"); goto out; }
-    uint8_t head[0x200];
-    if (!pread_all(fd, head, sizeof head, 0)) { WHY("the game package is too small"); goto out; }
-    if (!memcmp(head, "PFS0", 4)) {  // NSP
-        if (!read_fs0(fd, 0, &files)) { WHY("bad NSP"); goto out; }
-    } else if (!memcmp(head + 0x100, "HEAD", 4)) {  // XCI: the root HFS0's "secure" partition
-        uint64_t root;
-        memcpy(&root, head + 0x130, 8);
-        Entries parts = {0};
-        if (!read_fs0(fd, root, &parts)) { WHY("bad XCI"); goto out; }
-        for (int i = 0; i < parts.n; i++)
-            if (!strcmp(parts.e[i].name, "secure")) read_fs0(fd, parts.e[i].off, &files);
-        free(parts.e);
-        if (!files.n) { WHY("XCI without a secure partition"); goto out; }
-    } else {
-        entries_add(&files, "program.nca", 0, (uint64_t)sb.st_size);  // a bare NCA
-    }
-    for (int i = 0; i < files.n; i++)
-        if (files.e[i].off + files.e[i].size > (uint64_t)sb.st_size) {
-            WHY("the game package is incomplete (%llu MB missing): copy it again",
-                (unsigned long long)((files.e[i].off + files.e[i].size - (uint64_t)sb.st_size) >> 20));
-            goto out;
-        }
     Nca nca;
-    bool found = false;
-    bool any_nca = false;
-    for (int i = 0; i < files.n && !found; i++) {
-        size_t l = strlen(files.e[i].name);
-        if (l < 4 || strcmp(files.e[i].name + l - 4, ".nca")) continue;
-        if (!nca_header(fd, files.e[i].off, &ks, &nca)) continue;
-        any_nca = true;
-        found = nca.hdr[0x205] == 0;  // content type: program
-    }
-    if (!found) { WHY(any_nca ? "no game program in the package" : "can't decrypt the package (wrong or old keys?)"); goto out; }
+    Section exefs, romfs;
+    if (!open_program(package, &ks, keys_path, &fd, &sb, &files, &nca, why, why_size)) goto out;
     uint64_t tid;
     memcpy(&tid, nca.hdr + 0x210, 8);
     if (title_id) *title_id = tid;
-    int gen = nca.hdr[0x206] > nca.hdr[0x220] ? nca.hdr[0x206] : nca.hdr[0x220];
-    int keygen = gen ? gen - 1 : 0;
-    static const uint8_t zero[16];
-    if (memcmp(nca.hdr + 0x230, zero, 16)) {
-        if (!title_key(&nca, fd, &files, &ks, keys_path, keygen, nca.ctr_key)) {
-            WHY("the package needs a title key (no ticket in it, none in title.keys)");
-            goto out;
-        }
-    } else {
-        char kn[48];
-        snprintf(kn, sizeof kn, "key_area_key_application_%02x", keygen);
-        const uint8_t *kaek = key_get(&ks, kn, 16);
-        if (!kaek) { WHY("the keys file has no %s (keys from an older system?)", kn); goto out; }
-        uint8_t area[0x40];
-        memcpy(area, nca.hdr + 0x300, 0x40);
-        nx_aes128_ecb_decrypt(kaek, area, 0x40);
-        memcpy(nca.ctr_key, area + 0x20, 16);  // index 2: AES-CTR
-    }
-    Section exefs, romfs;
     if (!section_info(&nca, 0, &exefs) || !section_info(&nca, 1, &romfs) || exefs.fs_type != 1) {
         WHY("unexpected program layout");
         goto out;
     }
-    // ExeFS: a PFS0 of the NSOs and main.npdm
-    {
-        uint8_t h[16];
-        if (!section_read(fd, nca.base, &exefs, nca.ctr_key, h, exefs.data_off, 16) || memcmp(h, "PFS0", 4)) {
-            WHY("can't decrypt the game (wrong keys?)");
-            goto out;
-        }
-        uint32_t n, strsz;
-        memcpy(&n, h + 4, 4), memcpy(&strsz, h + 8, 4);
-        size_t meta = 16 + n * 0x18 + strsz;
-        uint8_t *m = malloc(meta);
-        section_read(fd, nca.base, &exefs, nca.ctr_key, m, exefs.data_off, meta);
-        char dir[1200];
-        snprintf(dir, sizeof dir, "%s/exefs", out_dir);
-        mkdir(out_dir, 0755), mkdir(dir, 0755);
-        bool wrote = true;
-        for (uint32_t i = 0; i < n && wrote; i++) {
-            uint64_t off, size;
-            uint32_t no;
-            memcpy(&off, m + 16 + i * 0x18, 8), memcpy(&size, m + 24 + i * 0x18, 8), memcpy(&no, m + 32 + i * 0x18, 4);
-            const char *name = (const char *)m + 16 + n * 0x18 + no;
-            if (no >= strsz || strchr(name, '/') || name[0] == '.') continue;
-            char path[1400];
-            snprintf(path, sizeof path, "%s/%.*s", dir, (int)strnlen(name, strsz - no), name);
-            wrote = write_file(path, fd, nca.base, &exefs, nca.ctr_key, exefs.data_off + meta + off, size);
-        }
-        free(m);
-        if (!wrote) { WHY("can't write the game code files (disk full?)"); goto out; }
-    }
-    // RomFS: described, not copied
-    {
-        char path[1200], tmp[1300], ctr[17], key[33], comp[33];
-        snprintf(path, sizeof path, "%s/romfs.src", out_dir);
-        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    if (!write_exefs(fd, &nca, &exefs, out_dir, why, why_size)) goto out;
+    {  // RomFS: described, not copied
+        char text[4096], ctr[17], key[33], comp[33];
         hex(ctr, romfs.ctr_hi, 8), hex(key, nca.ctr_key, 16), hex(comp, romfs.comp_hdr, 16);
-        FILE *f = fopen(tmp, "w");
-        if (!f) { WHY("can't write %s", path); goto out; }
-        fprintf(f, "package=%s\nsize=%llu\nnca=%llu\nsection=%llu %llu %u %s\nkey=%s\ndata=%llu %llu\ncomp=%llu %llu %s\n",
-                package, (unsigned long long)sb.st_size, (unsigned long long)nca.base, (unsigned long long)romfs.off,
-                (unsigned long long)romfs.size, romfs.enc_type, ctr, key, (unsigned long long)romfs.data_off,
-                (unsigned long long)romfs.data_size, (unsigned long long)romfs.comp_off, (unsigned long long)romfs.comp_size,
-                comp);
-        if (fclose(f) || rename(tmp, path)) { WHY("can't write %s", path); goto out; }
-        NxRomfs *r = nx_romfs_open(path, why, why_size);  // (checks the compression table and the RomFS header)
-        if (!r) goto out;
-        uint64_t hsize = 0;
-        ok = nx_romfs_pread(r, &hsize, 8, 0) == 8 && hsize == 0x50;
-        nx_romfs_close(r);
-        if (!ok) { WHY("the game data doesn't decrypt (wrong keys?)"); goto out; }
+        snprintf(text, sizeof text,
+                 "package=%s\nsize=%llu\nnca=%llu\nsection=%llu %llu %u %s\nkey=%s\ndata=%llu %llu\ncomp=%llu %llu %s\n",
+                 package, (unsigned long long)sb.st_size, (unsigned long long)nca.base, (unsigned long long)romfs.off,
+                 (unsigned long long)romfs.size, romfs.enc_type, ctr, key, (unsigned long long)romfs.data_off,
+                 (unsigned long long)romfs.data_size, (unsigned long long)romfs.comp_off,
+                 (unsigned long long)romfs.comp_size, comp);
+        ok = write_romfs_src(out_dir, text, why, why_size);
     }
 out:
     if (fd >= 0) close(fd);
+    free(files.e);
+    free(ks.k);
+    return ok;
+}
+
+bool nx_setup_update(const char *update, const char *keys_path, const char *out_dir, uint64_t *title_id, char *why,
+                     size_t why_size) {
+    Keys ks = {0};
+    if (!keys_load(keys_path, &ks)) return WHY("can't read the keys file");
+    bool ok = false;
+    Entries files = {0};
+    int fd = -1;
+    struct stat sb;
+    Nca nca;
+    Section exefs, romfs;
+    char *base = NULL;
+    if (!open_program(update, &ks, keys_path, &fd, &sb, &files, &nca, why, why_size)) goto out;
+    uint64_t tid;
+    memcpy(&tid, nca.hdr + 0x210, 8);
+    if (title_id) *title_id = tid;
+    if (!section_info(&nca, 0, &exefs) || !section_info(&nca, 1, &romfs) || exefs.fs_type != 1) {
+        WHY("unexpected update layout");
+        goto out;
+    }
+    const uint8_t *fh = nca.hdr + 0x400 + 0x200;  // the RomFS section's fs header: patch info at 0x100
+    uint64_t ind_off, ind_size, x_off, x_size;
+    memcpy(&ind_off, fh + 0x100, 8), memcpy(&ind_size, fh + 0x108, 8);
+    memcpy(&x_off, fh + 0x120, 8), memcpy(&x_size, fh + 0x128, 8);
+    if (!ind_size || !x_size || memcmp(fh + 0x110, "BKTR", 4) || memcmp(fh + 0x130, "BKTR", 4)) {
+        WHY("that package isn't a game update");
+        goto out;
+    }
+    {  // the base game's romfs.src (nx_setup's): its package and section stay, data / comp become the patch's
+        char path[1200];
+        snprintf(path, sizeof path, "%s/romfs.src", out_dir);
+        FILE *f = fopen(path, "r");
+        if (!f) { WHY("the base game isn't set up"); goto out; }
+        base = calloc(1, 8192);
+        size_t bn = 0;
+        char line[2048];
+        while (fgets(line, sizeof line, f))
+            if (strncmp(line, "data=", 5) && strncmp(line, "comp=", 5) && strncmp(line, "patch_", 6) &&
+                strncmp(line, "indirect=", 9) && strncmp(line, "ctrex=", 6) && bn + strlen(line) < 8191)
+                memcpy(base + bn, line, strlen(line)), bn += strlen(line);
+        fclose(f);
+    }
+    {  // (the layered RomFS first: it must read back before the base game's code is replaced)
+        char text[12288], ctr[17], key[33], comp[33], ih[33], xh[33];
+        hex(ctr, romfs.ctr_hi, 8), hex(key, nca.ctr_key, 16), hex(comp, romfs.comp_hdr, 16);
+        hex(ih, fh + 0x110, 16), hex(xh, fh + 0x130, 16);
+        snprintf(text, sizeof text,
+                 "%spatch_package=%s\npatch_size=%llu\npatch_nca=%llu\npatch_section=%llu %llu %u %s\npatch_key=%s\n"
+                 "indirect=%llu %llu %s\nctrex=%llu %llu %s\ndata=%llu %llu\ncomp=%llu %llu %s\n",
+                 base, update, (unsigned long long)sb.st_size, (unsigned long long)nca.base,
+                 (unsigned long long)romfs.off, (unsigned long long)romfs.size, romfs.enc_type, ctr, key,
+                 (unsigned long long)ind_off, (unsigned long long)ind_size, ih, (unsigned long long)x_off,
+                 (unsigned long long)x_size, xh, (unsigned long long)romfs.data_off, (unsigned long long)romfs.data_size,
+                 (unsigned long long)romfs.comp_off, (unsigned long long)romfs.comp_size, comp);
+        ok = write_romfs_src(out_dir, text, why, why_size) && write_exefs(fd, &nca, &exefs, out_dir, why, why_size);
+    }
+out:
+    if (fd >= 0) close(fd);
+    free(base);
     free(files.e);
     free(ks.k);
     return ok;

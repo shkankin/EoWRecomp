@@ -17,6 +17,12 @@ extern "C" {
 // title_id: the program's, out (may be NULL). false = failed (why: a short message for the player).
 bool nx_setup(const char *package, const char *keys, const char *out_dir, uint64_t *title_id, char *why, size_t why_size);
 
+// An update (patch NSP) over a base set up by nx_setup in out_dir: its ExeFS replaces the base's and romfs.src
+// describes the patched RomFS (the update's data over the base package's; both read in place). title_id: the
+// update's (the base's | 0x800), out (may be NULL). false = not an update, or failed (why).
+bool nx_setup_update(const char *update, const char *keys, const char *out_dir, uint64_t *title_id, char *why,
+                     size_t why_size);
+
 typedef struct NxRomfs NxRomfs;
 // From a romfs.src written by nx_setup. NULL = missing / the package moved or changed (why).
 NxRomfs *nx_romfs_open(const char *src_path, char *why, size_t why_size);
