@@ -23,6 +23,10 @@ O usuário vai jogar no Bazzite (Fedora Atomic, Radeon 890M, aberto pela Steam /
   `ActivateNpadWithRevision`) e abortava com hid 710; a condição agora é escrita (e `SetNpadJoyHoldType` é seguido).
 - **am**: `IApplicationFunctions` 210 devolve o evento que `nn::oe::GetOperationMode` espera (sem ele, o jogo ficava
   em loop no handle 0 no boot). `GetDisplayVersion` responde a versão real.
+- **Áudio (sem som na 1.1.0)**: o SDK novo usa o audio renderer REV15, com biquads em float: `VoiceInParameter`
+  passa de 0x170 a 0x188 bytes (cada filtro 0xC -> 0x18; o resto 0x18 adiante). Lido de 0x170 em 0x170, todas as
+  vozes menos a primeira eram lixo: silêncio (usuário, Bazzite / Legion Go 2). O tamanho agora vem da seção. Medido com
+  `EOWRECOMP_AUDIO_WAV` (60 s do boot): antes pico 0,000; depois pico 0,62 e RMS a cada 5 s a 0,002 do da 1.0.0.
 - **Diagnóstico**: `svcBreak` e espera em handle inválido mostram a cadeia de chamadas do jogo com símbolos (achou os
   dois problemas acima).
 - **Resultado (Windows / RTX 3070, Vulkan)**: setup pelo launcher com XCI + update + keys, código do jogo gerado em
