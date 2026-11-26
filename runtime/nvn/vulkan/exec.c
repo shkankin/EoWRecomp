@@ -378,6 +378,29 @@ static void dl_note(const char *fmt, ...) {
     vsnprintf(dl_ring[dl_n++ % DL_RING], sizeof dl_ring[0], fmt, ap);
     va_end(ap);
 }
+// The draw being recorded, always kept (a few stores per draw) and printed by a crash inside the driver's draw call:
+// a driver crash otherwise names no draw (Bazzite / RADV, the cutscene after the first Ganon fight: SIGSEGV in
+// vkCmdDrawIndexed).
+static struct {
+    uint64_t vs, fs;
+    VkPipeline pipe;
+    VkBuffer ib;
+    VkDeviceSize io;
+    int it, indexed, recording;
+    uint32_t count, inst, streams;
+    VkBuffer vb[17];
+    VkDeviceSize vo[17];
+} cur_draw;
+static void cur_draw_dump(void) {
+    if (!cur_draw.recording) return;
+    fprintf(stderr, "renderer: crashed recording a draw: %s vs %llx fs %llx count %u inst %u pipeline %p\n",
+            cur_draw.indexed ? "indexed" : "arrays", (unsigned long long)cur_draw.vs, (unsigned long long)cur_draw.fs,
+            cur_draw.count, cur_draw.inst, (void *)cur_draw.pipe);
+    if (cur_draw.indexed) fprintf(stderr, "  index buffer %p + %llu type %d\n", (void *)cur_draw.ib, (unsigned long long)cur_draw.io, cur_draw.it);
+    for (int s = 0; s < 17; s++)
+        if (cur_draw.streams >> s & 1)
+            fprintf(stderr, "  stream %d: %p + %llu\n", s, (void *)cur_draw.vb[s], (unsigned long long)cur_draw.vo[s]);
+}
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { dl_note("  upload %p %ux%u lv%u", img, w, h, lv); }
 // EOWRECOMP_VK_CHECKPOINTS=1 (with the trace, NVIDIA's VK_NV_device_diagnostic_checkpoints): a marker after each traced
 // draw / dispatch / pass naming its ring entry; on device loss the driver says how far each pipeline stage got.
@@ -3596,6 +3619,9 @@ static bool draw_(CmdRec *r, bool indexed, VkBuffer ind_buf, VkDeviceSize ind_of
     if (atomic_load(&pp->state) != 1) { SKIP(atomic_load(&pp->state) == 0 ? SKIP_PIPE_PENDING : SKIP_PIPE_FAILED); return true; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
+    if (!rt_fatal_hook) rt_fatal_hook = cur_draw_dump;
+    cur_draw.pipe = pp->pipe;
+    cur_draw.streams = k.used_streams;
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
@@ -3792,6 +3818,7 @@ static bool draw_(CmdRec *r, bool indexed, VkBuffer ind_buf, VkDeviceSize ind_of
         ss.ib = ib.buf; ss.io = ib.off; ss.it = itype_vk;
         vkCmdBindIndexBuffer(cb, ib.buf, ib.off, itype_vk);
     }
+    cur_draw.ib = ss.ib, cur_draw.io = ss.io, cur_draw.it = (int)ss.it;
 
     // ---- vertex streams: the range this draw can read, copied once per submission
     for (int s = 0; s < 17; s++) {
@@ -3846,6 +3873,10 @@ static bool draw_(CmdRec *r, bool indexed, VkBuffer ind_buf, VkDeviceSize ind_of
             (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
             (unsigned)(use_index ? icount : count), (unsigned)inst);
     dl_checkpoint(cb);
+    cur_draw.vs = st.program->stages[0].code_addr, cur_draw.fs = st.program->stages[1].code_addr;
+    cur_draw.indexed = use_index, cur_draw.count = use_index ? icount : count, cur_draw.inst = inst;
+    memcpy(cur_draw.vb, ss.vb, sizeof cur_draw.vb), memcpy(cur_draw.vo, ss.vo, sizeof cur_draw.vo);
+    cur_draw.recording = 1;
     if (ind_buf != VK_NULL_HANDLE) {
         if (!indexed) vkCmdDrawIndirect(cb, ind_buf, ind_off, 1, 0);
         else vkCmdDrawIndexedIndirect(cb, ind_buf, ind_off, 1, 0);
@@ -3860,6 +3891,7 @@ static bool draw_(CmdRec *r, bool indexed, VkBuffer ind_buf, VkDeviceSize ind_of
             else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
         }
     }
+    cur_draw.recording = 0;
     if (probing) probe_end(cb);
     stat_draws++;
     cum_draws++;
