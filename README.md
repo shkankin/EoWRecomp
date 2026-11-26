@@ -30,8 +30,9 @@ offered back to that project in
 
 > [!WARNING]
 > **No game files are included.** You need your own legally obtained copy of *The Legend of Zelda: Echoes of Wisdom*
-> v1.0.0 (title ID `01008CF01BAAC000`) and your own `prod.keys`. This repository does not provide game files, keys, or
-> instructions for obtaining them.
+> v1.0.0 (title ID `01008CF01BAAC000`) and your own `prod.keys`; the v1.1.0 update works too (put your update `.nsp`
+> in the same folder as the `.xci` / `.nsp`). This repository does not provide game files, keys, or instructions for
+> obtaining them.
 
 ## Screenshots (Windows 11, RTX 3070 Laptop, 1280x720)
 
@@ -75,10 +76,10 @@ Fixed in this fork (each verified by repeated scripted runs; details in [docs/ST
 ### Known issues on Windows
 
 - **Hitches the first time new graphics appear**: the NVIDIA driver takes 0.1-0.6 s to build some full-screen shaders the
-  first time. `F1` -> Video -> **Shader compilation** decides what happens meanwhile: `Sync` (default) waits - no
-  glitches, but stalls of up to ~2 s on a fresh install; `Async` never waits - smooth (worst ~0.2 s measured), at the
-  cost of a one-frame flash the first time a big effect appears; `Smart` is in between. Once the shader cache (`cache/`)
-  has them, all three play about the same. We use **Async** on the test laptop.
+  first time. `F1` -> Video -> **Shader compilation** decides what happens meanwhile: `Async` (default in this fork)
+  never waits - smooth (worst ~0.2 s measured), at the cost of a one-frame flash the first time a big effect appears;
+  `Sync` waits - no glitches, but stalls of up to ~2 s on a fresh install (drops to 1-3 fps on a Radeon 890M);
+  `Smart` is in between. Once the shader cache (`cache/`) has them, all three play about the same.
 - **Audio** is not verified yet (the test machine has no sound output).
 - Only one Windows machine (NVIDIA) has been tested; AMD / Intel GPUs on Windows are untested.
 
