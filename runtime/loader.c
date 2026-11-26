@@ -8,7 +8,9 @@ Module g_modules[GAME_NMODULES];
 int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
-       DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28 };
+       DT_JMPREL = 23, DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FINI_ARRAYSZ = 28,
+       // newer SDKs (Echoes of Wisdom 1.1.0's modules): relative relocations packed as RELR, and only a GNU hash table
+       DT_RELRSZ = 35, DT_RELR = 36, DT_GNU_HASH = 0x6FFFFEF5 };
 enum { R_ABS64 = 257, R_GLOB_DAT = 1025, R_JUMP_SLOT = 1026, R_RELATIVE = 1027 };
 
 typedef struct { uint32_t name; uint8_t info, other; uint16_t shndx; uint64_t value, size; } Elf64Sym;
@@ -49,6 +51,18 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return p;
 }
 
+// The number of dynamic symbols from a GNU hash table (no DT_HASH): past the end of the highest bucket's chain
+static uint64_t gnu_hash_nsyms(uint64_t h) {
+    const uint32_t *w = (const uint32_t *)h;
+    uint32_t nbuckets = w[0], symoffset = w[1], bloom_size = w[2];
+    const uint32_t *buckets = (const uint32_t *)(h + 16 + (uint64_t)bloom_size * 8), *chains = buckets + nbuckets;
+    uint32_t top = 0;
+    for (uint32_t i = 0; i < nbuckets; i++) top = buckets[i] > top ? buckets[i] : top;
+    if (top < symoffset) return symoffset;
+    while (!(chains[top - symoffset] & 1)) top++;
+    return (uint64_t)top + 1;
+}
+
 static void load_nso(Module *m, const char *path, uint64_t base) {
     size_t len;
     uint8_t *raw = read_file(path, &len);
@@ -79,11 +93,13 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
     uint32_t mod0 = *(uint32_t *)(base + 4);
     uint64_t mod = base + mod0;
     m->dynamic = mod + *(int32_t *)(mod + 4);
+    uint64_t gnu_hash = 0;
     for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
         switch (d[0]) {
         case DT_SYMTAB: m->symtab = base + d[1]; break;
         case DT_STRTAB: m->strtab = base + d[1]; break;
         case DT_HASH: m->nsyms = *(uint32_t *)(base + d[1] + 4); break;
+        case DT_GNU_HASH: gnu_hash = base + d[1]; break;
         case 12: m->init = base + d[1]; break;  // DT_INIT
         case 13: m->fini = base + d[1]; break;  // DT_FINI
         case DT_INIT_ARRAY: m->init_array = base + d[1]; break;
@@ -92,6 +108,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
         case DT_FINI_ARRAYSZ: m->fini_array_sz = d[1]; break;
         }
     }
+    if (!m->nsyms && gnu_hash) m->nsyms = gnu_hash_nsyms(gnu_hash);
     LOG("loaded %-5s at %llx size %llx syms %llu\n", m->name, base, size, m->nsyms);
 }
 
@@ -147,12 +164,28 @@ static uint64_t resolve(Module *m, uint32_t symidx) {
 }
 
 static void relocate(Module *m) {
-    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
     for (uint64_t *d = (uint64_t *)m->dynamic; d[0] != DT_NULL; d += 2) {
+        if (d[0] == DT_RELR) relr = m->base + d[1];
+        if (d[0] == DT_RELRSZ) relrsz = d[1];
         if (d[0] == DT_RELA) rela = m->base + d[1];
         if (d[0] == DT_RELASZ) relasz = d[1];
         if (d[0] == DT_JMPREL) jmprel = m->base + d[1];
         if (d[0] == DT_PLTRELSZ) pltsz = d[1];
+    }
+    // RELR: an even word is the address of a relative relocation (the addend in place), an odd one a bitmap of the
+    // 63 words after the last address
+    uint64_t *where = NULL;
+    for (uint64_t i = 0; i < relrsz / 8; i++) {
+        uint64_t e = ((const uint64_t *)relr)[i];
+        if (!(e & 1)) {
+            where = (uint64_t *)(m->base + e);
+            *where++ += m->base;
+        } else {
+            for (int b = 0; b < 63; b++)
+                if (e >> (b + 1) & 1) where[b] += m->base;
+            where += 63;
+        }
     }
     int unresolved = 0;
     for (int pass = 0; pass < 2; pass++) {

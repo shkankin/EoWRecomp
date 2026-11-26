@@ -5,7 +5,40 @@ import lz4.block
 
 DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ = 0, 1, 2, 4, 5, 6, 7, 8
 DT_STRSZ, DT_JMPREL, DT_RELACOUNT = 10, 23, 0x6FFFFFF9
+# Newer SDKs (Echoes of Wisdom 1.1.0's modules): only a GNU hash table for the symbols (no DT_HASH), and relative
+# relocations packed as RELR (the addend in place) beside the RELA ones
+DT_RELRSZ, DT_RELR, DT_GNU_HASH = 35, 36, 0x6FFFFEF5
 R_AARCH64_ABS64, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_RELATIVE = 257, 1025, 1026, 1027
+
+
+def gnu_hash_nsyms(n, h):
+    """Number of dynamic symbols from a GNU hash table: past the highest bucket's chain end (or symoffset)."""
+    nbuckets, symoffset, bloom_size = n.u32(h), n.u32(h + 4), n.u32(h + 8)
+    buckets = h + 16 + bloom_size * 8
+    top = max((n.u32(buckets + 4 * i) for i in range(nbuckets)), default=0)
+    if top < symoffset:
+        return symoffset
+    chains = buckets + 4 * nbuckets
+    while not n.u32(chains + 4 * (top - symoffset)) & 1:
+        top += 1
+    return top + 1
+
+
+def relr_offsets(n, relr, size):
+    """The places a RELR table relocates: an even word is an address (then the next word), an odd one a bitmap of
+    the 63 words after the last address."""
+    out, where = [], 0
+    for i in range(size // 8):
+        e = n.u64(relr + 8 * i)
+        if not e & 1:
+            out.append(e)
+            where = e + 8
+        else:
+            for b in range(63):
+                if e >> (b + 1) & 1:
+                    out.append(where + 8 * b)
+            where += 63 * 8
+    return out
 
 
 class Nso:
@@ -58,10 +91,10 @@ class Nso:
         strtab = dyn.get(DT_STRTAB, 0)
         self.strtab = strtab
         self.needed = [self.cstr(strtab + n) for n in needed]
-        # dynsym count from DT_HASH nchain
+        # dynsym count from DT_HASH nchain, or from the GNU hash table
         self.syms = []
-        if DT_HASH in dyn and DT_SYMTAB in dyn:
-            nchain = self.u32(dyn[DT_HASH] + 4)
+        nchain = self.u32(dyn[DT_HASH] + 4) if DT_HASH in dyn else gnu_hash_nsyms(self, dyn[DT_GNU_HASH]) if DT_GNU_HASH in dyn else 0
+        if nchain and DT_SYMTAB in dyn:
             st = dyn[DT_SYMTAB]
             for i in range(nchain):
                 o = st + i * 24
@@ -75,6 +108,9 @@ class Nso:
                 for i in range(n):
                     r_off, r_info, r_add = struct.unpack_from('<QQq', self.image, b + i * 24)
                     self.relocs.append((r_off, r_info & 0xFFFFFFFF, r_info >> 32, r_add))
+        if DT_RELR in dyn:  # (as R_RELATIVE with the addend that's in place)
+            for r_off in relr_offsets(self, dyn[DT_RELR], dyn.get(DT_RELRSZ, 0)):
+                self.relocs.append((r_off, R_AARCH64_RELATIVE, 0, self.u64(r_off)))
 
     def cstr(self, off):
         end = self.image.index(b'\0', off)
