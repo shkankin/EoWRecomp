@@ -5,6 +5,7 @@
 #include "rt.h"
 
 Module g_modules[GAME_NMODULES];
+uint8_t g_main_build_id[8];  // (the game version: rt_game_version)
 int g_nmodules;
 
 enum { DT_NULL = 0, DT_PLTRELSZ = 2, DT_HASH = 4, DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8,
@@ -83,6 +84,7 @@ static void load_nso(Module *m, const char *path, uint64_t base) {
             memcpy(dst, raw + seg[i][0], seg[i][2]);
         }
     }
+    if (!strcmp(m->name, "main")) memcpy(g_main_build_id, raw + 0x40, 8);
     free(raw);
     m->base = base;
     m->size = size;

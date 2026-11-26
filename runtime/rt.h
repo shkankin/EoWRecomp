@@ -38,6 +38,7 @@ typedef struct Module {
 } Module;
 
 extern Module g_modules[GAME_NMODULES];
+extern uint8_t g_main_build_id[8];
 Module *loader_module(const char *name);  // NULL if not loaded
 extern int g_nmodules;
 void loader_load(const char *exefs_dir);  // (again after a reboot: modules are reloaded into wiped memory)

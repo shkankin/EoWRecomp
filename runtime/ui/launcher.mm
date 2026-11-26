@@ -90,25 +90,8 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 }
 #endif
 
-// The game versions EoWRecomp runs, by the main module's build id (docs/STATUS.md): 1.0.0 as sold, 1.1.0 from the
-// update package (title version v196608) over it
-static const struct { uint8_t id[8]; const char *version; } GAME_BUILDS[] = {
-    {{0xa5, 0x81, 0x40, 0x6b, 0xc9, 0x85, 0x86, 0x51}, "1.0.0"},
-    {{0x9f, 0x22, 0x1e, 0x1a, 0xfa, 0x65, 0xba, 0x54}, "1.1.0"},
-};
-
-// The game version of a main module ("1.0.0"), or NULL: missing, or a version EoWRecomp doesn't know
-static const char *game_version(const std::string &main_path) {
-    FILE *f = fopen(main_path.c_str(), "rb");
-    if (!f) return NULL;
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    for (const auto &b : GAME_BUILDS)
-        if (n == 8 && !memcmp(id, b.id, 8)) return b.version;
-    return NULL;
-}
+// The game version of a main module ("1.0.0"), or NULL: missing, or a version EoWRecomp doesn't know (runtime/paths.c)
+static const char *game_version(const std::string &main_path) { return rt_game_version_file(main_path.c_str()); }
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): alpha_<n> while the game isn't playable, beta_<n> until 1.0, then v<major>.<minor>.<patch>.
 #define EOWRECOMP_VERSION "v0.5.0"

@@ -37,6 +37,10 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n);
 bool rt_remove_game_file(const char *game_dir, const char *name);
 // All the game files set up there (rt_remove_game_file on each, then the empty folder). Saves, seeds, settings stay.
 bool rt_remove_game_files(const char *game_dir);
+// The game version ("1.0.0", "1.1.0") of a main module's build id (its first 8 bytes), NULL = one EoWRecomp doesn't
+// run. rt_game_version_file: of a main NSO file (the build id at 0x40).
+const char *rt_game_version(const unsigned char id[8]);
+const char *rt_game_version_file(const char *main_path);
 // Bytes taken by the extracted game files in game_dir (links not followed).
 unsigned long long rt_game_files_size(const char *game_dir);
 

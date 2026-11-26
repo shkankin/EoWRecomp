@@ -172,6 +172,28 @@ bool rt_resource(const char *name, const char *dev_rel, char *out, size_t n) {
 }
 
 // ---- game files
+// The game versions EoWRecomp runs, by the main module's build id (docs/STATUS.md): 1.0.0 as sold, 1.1.0 from the
+// update package (title version v196608) over it
+static const struct { unsigned char id[8]; const char *version; } GAME_BUILDS[] = {
+    {{0xa5, 0x81, 0x40, 0x6b, 0xc9, 0x85, 0x86, 0x51}, "1.0.0"},
+    {{0x9f, 0x22, 0x1e, 0x1a, 0xfa, 0x65, 0xba, 0x54}, "1.1.0"},
+};
+
+const char *rt_game_version(const unsigned char id[8]) {
+    for (size_t i = 0; i < sizeof GAME_BUILDS / sizeof *GAME_BUILDS; i++)
+        if (!memcmp(id, GAME_BUILDS[i].id, 8)) return GAME_BUILDS[i].version;
+    return NULL;
+}
+
+const char *rt_game_version_file(const char *main_path) {
+    FILE *f = fopen(main_path, "rb");
+    if (!f) return NULL;
+    unsigned char id[8] = {0};
+    bool ok = fseek(f, 0x40, SEEK_SET) == 0 && fread(id, 1, 8, f) == 8;
+    fclose(f);
+    return ok ? rt_game_version(id) : NULL;
+}
+
 // What the setup (runtime/ui/launcher.mm) creates in extracted/, plus what older versions' extraction and manual
 // extractions left there (never read at run time).
 static const char *const GAME_FILES[] = {"exefs", "romfs", "romfs.bin", "romfs.src", "keys", GAMELIB_NAME, GAMELIB_NAME ".id", ".gamebuild",
