@@ -50,8 +50,20 @@ O usuário vai jogar no Bazzite (Fedora Atomic, Radeon 890M, aberto pela Steam /
   jogo é gerado de novo, ~25 min). A tela inicial deve mostrar v1.1.0.
 - Jogar com os saves e observar travamentos novos (mandar `~/.local/share/eowrecomp/eowrecomp.log`).
 
+### Confirmado depois
+- **Linux / Bazzite com 1.1.0**: o usuário jogou no Legion Go 2 com som ("playing great").
+- **1.0.0 com o código novo** (Windows, instalação de teste `C:\EoW\pkg-100`, só o XCI): Set up regenera o código do
+  jogo (o gerador mudou: `nso.py`), 1242 s; saves carregam, Zelda anda, 60 fps, som (REV11). O `eowgame.dll` antigo é
+  recusado ("built for another version"), como esperado: quem atualiza precisa rodar Set up de novo.
+
+### Branches e PRs (desde 2026-11-26)
+- `dev`: tudo; trabalho novo entra aqui. `main` do fork = `dev` + README do fork + CI do AppImage.
+- PRs para patrickksmdev/EoWRecomp, um assunto cada, a partir do `main` dele: #1 `win-on-patrick` (Windows / NVIDIA),
+  #2 `pr/v110` (1.1.0 + som REV15; compila sozinho), #3 `pr/appimage-font`. O padrão Async fica só no fork (ele
+  escolheu Sync).
+
 ### Próximo passo
-- Confirmação da 1.1.0 no Linux pelo usuário; corrigir o que aparecer.
+- Corrigir o que o usuário encontrar jogando (log do Bazzite).
 - `ICommonStateGetter` 66 aparece como não tratado na 1.1.0 (inofensivo até agora).
 
 ## Sessão 9 (2026-11-24): Windows 11 / RTX 3070 Laptop (NVIDIA, Vulkan 1.4) — este tree no Windows
