@@ -1,6 +1,7 @@
 // Start screen, shown before the game boots (user 2026-10-08, styled after Dusklight's launcher): PLAY (with
 // ‹ Vanilla / seed › picker), SETTINGS, QUIT, game-files status at the lower left. Nothing of the game ships with
-// EoWRecomp: on first launch the user picks the folder with their own game files (v1.0.0), we check the main
+// EoWRecomp: on first launch the user picks the folder with their own game files (v1.0.0, or with the 1.1.0 update
+// .nsp beside the base game's package), we check the main
 // module's build id, copy the files and build the game's data image; PLAY stays disabled until that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
 //
 // Skipped with --play, EOWRECOMP_NO_LAUNCHER=1, or any scripted test run (EOWRECOMP_INPUT): tests boot straight in.
@@ -89,7 +90,25 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 }
 #endif
 
-static const uint8_t BUILD_ID[8] = {0xa5, 0x81, 0x40, 0x6b, 0xc9, 0x85, 0x86, 0x51};  // Echoes of Wisdom v1.0.0 main (docs/STATUS.md)
+// The game versions EoWRecomp runs, by the main module's build id (docs/STATUS.md): 1.0.0 as sold, 1.1.0 from the
+// update package (title version v196608) over it
+static const struct { uint8_t id[8]; const char *version; } GAME_BUILDS[] = {
+    {{0xa5, 0x81, 0x40, 0x6b, 0xc9, 0x85, 0x86, 0x51}, "1.0.0"},
+    {{0x9f, 0x22, 0x1e, 0x1a, 0xfa, 0x65, 0xba, 0x54}, "1.1.0"},
+};
+
+// The game version of a main module ("1.0.0"), or NULL: missing, or a version EoWRecomp doesn't know
+static const char *game_version(const std::string &main_path) {
+    FILE *f = fopen(main_path.c_str(), "rb");
+    if (!f) return NULL;
+    uint8_t id[8] = {0};
+    fseek(f, 0x40, SEEK_SET);
+    size_t n = fread(id, 1, 8, f);
+    fclose(f);
+    for (const auto &b : GAME_BUILDS)
+        if (n == 8 && !memcmp(id, b.id, 8)) return b.version;
+    return NULL;
+}
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): alpha_<n> while the game isn't playable, beta_<n> until 1.0, then v<major>.<minor>.<patch>.
 #define EOWRECOMP_VERSION "v0.5.0"
@@ -182,13 +201,8 @@ static bool file_exists(const std::string &p) {
 
 // The copied game files alone ("" = there), without the game code built from them
 static std::string check_copied_files(const std::string &root) {
-    FILE *f = fopen((root + "/exefs/main").c_str(), "rb");
-    if (!f) return "No game files";
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong game version (needs v1.0.0)";
+    if (!file_exists(root + "/exefs/main")) return "No game files";
+    if (!game_version(root + "/exefs/main")) return "Wrong game version (needs v1.0.0 or v1.1.0)";
     // the data the game reads (services/fs.c): an image, or the description of where it is in the game package
     if (!file_exists(root + "/romfs.bin") && !file_exists(root + "/romfs.src")) return "Game data missing";
     return "";
@@ -231,7 +245,7 @@ static void set_failure(int k) {
         "Choose the folder that holds the game files.",
         "Compressed packages (.nsz / .xcz) can't be read: decompress them to .nsp / .xci first.",
         "Make sure there's about 12 GB free and try again.",
-        "EoWRecomp needs version 1.0.0 of the game, without updates.",
+        "EoWRecomp runs version 1.0.0 of the game, or 1.1.0: the 1.1.0 update (.nsp) beside the game's .xci / .nsp.",
         "Some files are missing. Choose the folder again; if it happens again, copy your extracted game files again.",
         "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub."};
     if (k >= 1 && k <= 6) set_job(head[k], true, hint[k]);
@@ -244,9 +258,10 @@ static bool is_dir(const std::string &p) {
 
 // exefs: the folder with main and main.npdm; romfs: a folder named romfs (the game's data root); or the game package
 // itself (package: .nsp / .xci / .nca, read in place by runtime/nxpkg.c) and the keys file beside it (prod.keys).
-// Found in the picked folder or a few levels below it (some folder layouts nest them).
+// Found in the picked folder or a few levels below it (some folder layouts nest them). others: the smaller packages
+// (an update .nsp, tried over the base game's by nx_setup_update).
 static void find_game(const std::string &dir, int depth, std::string &exefs, std::string &romfs, std::string &package,
-                      std::string &keys, bool &unusable) {
+                      std::string &keys, bool &unusable, std::vector<std::string> &others) {
     if (depth > 4 || (!exefs.empty() && !romfs.empty())) return;
     if (exefs.empty() && file_exists(dir + "/main") && file_exists(dir + "/main.npdm")) exefs = dir;
     DIR *d = opendir(dir.c_str());
@@ -264,10 +279,12 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
             continue;
         }
         if (ext == ".nsz" || ext == ".xcz") unusable = true;  // (compressed packages: decompress them first)
-        if ((ext == ".xci" || ext == ".nsp" || ext == ".nca") && !S_ISDIR(st.st_mode) && (uint64_t)st.st_size > best &&
-            package.empty()) {
-            best = (uint64_t)st.st_size;  // (the biggest: the base game, not a small update or DLC)
-            package = dir + "/" + n;
+        if ((ext == ".xci" || ext == ".nsp" || ext == ".nca") && !S_ISDIR(st.st_mode)) {
+            // (the biggest: the base game; the rest may be its update)
+            bool base_here = package.empty() || (uint64_t)st.st_size > best;
+            if (base_here && !package.empty() && best) others.push_back(package);
+            if (base_here) best = (uint64_t)st.st_size, package = dir + "/" + n;
+            else others.push_back(dir + "/" + n);
         }
         if (lower == "prod.keys" && keys.empty()) keys = dir + "/" + n;
         if (S_ISDIR(st.st_mode)) {
@@ -277,18 +294,11 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
     }
     closedir(d);
     std::sort(sub.begin(), sub.end());
-    for (auto &s : sub) find_game(s, depth + 1, exefs, romfs, package, keys, unusable);
+    for (auto &s : sub) find_game(s, depth + 1, exefs, romfs, package, keys, unusable, others);
 }
 
-static bool build_id_ok(const std::string &main_path) {
-    FILE *f = fopen(main_path.c_str(), "rb");
-    if (!f) return false;
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    return n == 8 && !memcmp(id, BUILD_ID, 8);
-}
+static bool build_id_ok(const std::string &main_path) { return game_version(main_path) != NULL; }
+static std::atomic<const char *> g_game_version{nullptr};  // the set-up game's version for the start screen, once read
 
 // progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/
 static std::atomic<unsigned long long> g_done, g_total;
@@ -383,6 +393,7 @@ static void *extract_thread(void *) {
     pthread_mutex_unlock(&g_lock);
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
     std::string exefs, romfs, package, keys;
+    std::vector<std::string> others;  // (packages besides the base game's: its update?)
     bool unusable = false;  // (compressed game packages)
     bool cleaned = false;   // (an earlier setup's files removed already: the keys copied in since stay)
     if (src.empty() && check_copied_files(g_root).empty()) {  // copied already (an update needs new game code)
@@ -411,7 +422,7 @@ static void *extract_thread(void *) {
         package = uri, keys = kdir + "/prod.keys";
     } else
 #endif
-    find_game(src, 0, exefs, romfs, package, keys, unusable);
+    find_game(src, 0, exefs, romfs, package, keys, unusable, others);
     fprintf(stderr, "[launcher] find_game in '%s': package='%s' keys='%s' exefs='%s' romfs='%s' compressed=%d\n", src.c_str(),
             package.c_str(), keys.c_str(), exefs.c_str(), romfs.c_str(), (int)unusable);
     if ((exefs.empty() || romfs.empty()) && !package.empty()) {  // the game package: ExeFS out, RomFS read in place
@@ -435,6 +446,24 @@ static void *extract_thread(void *) {
             rt_remove_game_files(g_root.c_str());
             set_failure(FAIL_VERSION);
             goto done;
+        }
+        // the update beside it (1.1.0): its code and data over the base game's. Packages that aren't this game's update
+        // are skipped; one that is but doesn't read, or is a version EoWRecomp doesn't know, stops the setup
+        for (const auto &o : others) {
+            uint64_t utid = 0;
+            why[0] = 0;
+            set_job("Reading the game update...");
+            bool applied = nx_setup_update(o.c_str(), keys.c_str(), g_root.c_str(), &utid, why, sizeof why);
+            fprintf(stderr, "[launcher] update %s: %s\n", o.c_str(), applied ? "applied" : why);
+            if (!applied && (utid & ~0xFFFull) != 0x01008CF01BAAC000ull) continue;  // (not this game's)
+            if (!applied && strstr(why, "isn't a game update")) continue;
+            if (!applied || !build_id_ok(g_root + "/exefs/main")) {
+                rt_remove_game_files(g_root.c_str());
+                if (applied) set_failure(FAIL_VERSION);
+                else why[0] = (char)toupper((unsigned char)why[0]), set_job("The game update can't be used", true, why);
+                goto done;
+            }
+            break;
         }
         if (!build_game_code()) goto done;
         goto check;
@@ -480,6 +509,7 @@ check:
         else set_failure(why.find("version") != std::string::npos ? FAIL_VERSION : FAIL_MISSING);
     }
 done:
+    g_game_version = nullptr;  // (the version shown: read again)
     pthread_mutex_lock(&g_lock);
     g_busy = false;
     pthread_mutex_unlock(&g_lock);
@@ -1423,7 +1453,8 @@ extern "C" void launcher_run(const char *root) {
                 };
                 std::string src_d = "The folder with your own copy of The Legend of Zelda: Echoes of Wisdom for Nintendo "
                                     "Switch, version 1.0.0: the .nsp or .xci with the prod.keys of your Switch beside it, "
-                                    "or the extracted exefs / romfs folders. The game isn't included with EoWRecomp.";
+                                    "or the extracted exefs / romfs folders. Version 1.1.0: put the update's .nsp in the "
+                                    "same folder, it's used too. The game isn't included with EoWRecomp.";
                 if (!src.empty()) src_d += "\n\nChosen: " + (src.compare(0, 8, "android:") ? src : src.substr(8));
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
@@ -1593,7 +1624,9 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1), "Game files ready.");
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v1.0.0");
+                const char *ver = g_game_version.load();
+                if (!ver) g_game_version = ver = game_version(g_root + "/exefs/main");  // (once; again after a setup)
+                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v%s", ver ? ver : "?");
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);
