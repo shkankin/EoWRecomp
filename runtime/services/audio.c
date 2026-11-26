@@ -674,7 +674,10 @@ static void *renderer_tick(void *arg) {
     return NULL;
 }
 
-static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) {
+// VoiceInParameter: 0x170 bytes, or 0x188 with float biquad filters (Echoes of Wisdom 1.1.0's SDK, REV15: each
+// BiquadFilterParameter 0xC -> 0x18, everything after them 0x18 later). fbq: the float layout.
+static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out, bool fbq) {
+    const int d = fbq ? 0x18 : 0;
     uint8_t is_new = p[8];
     if (is_new) {
         memset(v, 0, sizeof *v);
@@ -696,28 +699,33 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) 
     v->chans = ch > 6 ? 6 : (uint8_t)ch;
     memcpy(&v->pitch, p + 28, 4);
     memcpy(&v->volume, p + 32, 4);
-    memcpy(&v->wb_count, p + 60, 4);
-    memcpy(&v->ds_addr, p + 72, 8);
-    memcpy(&v->mix_id, p + 88, 4);
-    memcpy(&v->splitter_id, p + 92, 4);
-    memcpy(v->chan_ids, p + 320, 24);
-    v->flush += p[345];
-    memcpy(&v->behaviour, p + 348, 2);
-    if (p[344]) v->drop = 0;
-    for (int f = 0; f < 2; f++) {  // BiquadFilterParameter: enable, reserved, s16 numerator[3], denominator[2] (Q14)
-        const uint8_t *b = p + 36 + f * 12;
+    memcpy(&v->wb_count, p + 60 + d, 4);
+    memcpy(&v->ds_addr, p + 72 + d, 8);
+    memcpy(&v->mix_id, p + 88 + d, 4);
+    memcpy(&v->splitter_id, p + 92 + d, 4);
+    memcpy(v->chan_ids, p + 320 + d, 24);
+    v->flush += p[345 + d];
+    memcpy(&v->behaviour, p + 348 + d, 2);
+    if (p[344 + d]) v->drop = 0;
+    // BiquadFilterParameter: enable, reserved, s16 numerator[3], denominator[2] (Q14); the float one: enable,
+    // reserved[3], f32 numerator[3], denominator[2]
+    for (int f = 0; f < 2; f++) {
+        const uint8_t *b = p + 36 + f * (fbq ? 0x18 : 12);
+        float c[5];
+        if (fbq) memcpy(c, b + 4, 20);
+        else {
+            int16_t q[5];
+            memcpy(q, b + 2, 10);
+            for (int k = 0; k < 5; k++) c[k] = q[k] / 16384.0f;
+        }
         if (b[0] && !v->bq_on[f]) {
             v->bq_reset[f] = 1;
-            if (getenv("EOWRECOMP_AUDIO_LOG")) {
-                int16_t k[5];
-                memcpy(k, b + 2, 10);
-                LOG("[audren] v%ld biquad%d on: %d %d %d / %d %d\n", (long)(v - r->voice), f, k[0], k[1], k[2], k[3], k[4]);
-            }
+            if (getenv("EOWRECOMP_AUDIO_LOG"))
+                LOG("[audren] v%ld biquad%d on: %.4f %.4f %.4f / %.4f %.4f\n", (long)(v - r->voice), f, c[0], c[1], c[2],
+                    c[3], c[4]);
         }
         v->bq_on[f] = b[0];
-        int16_t c[5];
-        memcpy(c, b + 2, 10);
-        for (int k = 0; k < 5; k++) v->bq[f][k] = c[k] / 16384.0f;
+        for (int k = 0; k < 5; k++) v->bq[f][k] = c[k];
     }
     if (v->splitter_id != 0xFFFFFFFF && v->mix_id < 0) {
         static int warned;
@@ -727,7 +735,7 @@ static void update_voice(Renderer *r, Voice *v, const uint8_t *p, uint8_t *out) 
     if (is_new)
         for (int c = 0; c < v->chans; c++) memset(r->chst[v->chan_ids[c] % r->voices].valid, 0, WB_COUNT);
     for (int i = 0; i < WB_COUNT; i++) {
-        const uint8_t *w = p + 96 + i * 0x38;
+        const uint8_t *w = p + 96 + d + i * 0x38;
         WaveBuf *wb = &v->wb[i];
         if (!cs0->valid[i] && wb->sent) wb->addr = 0;
         if (!w[26]) {  // !SentToServer: a new buffer for the DSP
@@ -828,7 +836,9 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
             LOG("[audren] dumped %s (%llu bytes, rev %08x)\n", path, (unsigned long long)in->size, r->revision);
         }
     }
-    uint32_t npools = pools_sz / 0x20, nvoices = voices_sz / 0x170, neffects = effects_sz / 0xC0;
+    // (voice parameters: 0x170 bytes each, or 0x188 with float biquads - the section holds one per voice)
+    uint32_t vsz = r->voices && voices_sz % r->voices == 0 && voices_sz / r->voices == 0x188 ? 0x188 : 0x170;
+    uint32_t npools = pools_sz / 0x20, nvoices = voices_sz / vsz, neffects = effects_sz / 0xC0;
     uint32_t nchans = chans_sz / 0x70, nsinks = sinks_sz / 0x140;
     if (nvoices > r->voices) nvoices = r->voices;
     if (nchans > r->voices) nchans = r->voices;
@@ -859,8 +869,8 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
     oh[3] = r->voices * 0x10;
     for (uint32_t i = 0; i < r->voices; i++) r->voice[i].in_use = 0;
     for (uint32_t i = 0; i < nvoices && o + 0x10 <= out->size; i++, o += 0x10) {
-        const uint8_t *v = vin + i * 0x170;
-        if (v[9]) update_voice(r, &r->voice[i], v, op + o);
+        const uint8_t *v = vin + i * vsz;
+        if (v[9]) update_voice(r, &r->voice[i], v, op + o, vsz == 0x188);
     }
     // effects (not processed): report them as enabled/disabled per request
     const uint8_t *ein = vin + voices_sz;
