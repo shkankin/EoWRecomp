@@ -24,7 +24,7 @@ Settings g_settings = {
     .show_fps = false,
     .vsync = true,
     .fps_limit = 60,
-    .sync_shaders = SHADER_SYNC,
+    .sync_shaders = SHADER_ASYNC,  // (Sync / Smart stall up to 1-2 s on each new pipeline while the cache is cold)
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
 };
 

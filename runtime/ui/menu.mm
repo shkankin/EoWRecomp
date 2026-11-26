@@ -500,9 +500,10 @@ static void tab_display(void) {
                "blends only along them, so textures stay sharp. Most useful at a lower internal resolution.");
     {
         static const char *sh_modes[] = {"Smart", "Sync", "Async"};
-        opt_choice("Shader compilation", &g_settings.sync_shaders, sh_modes, 3, SHADER_SMART,
-                   "Smart: pre-warms shaders during loading and only waits on fullscreen/compute passes (no black "
-                   "flashes, minimal hitches). Sync: always waits (no pop-in). Async: never waits.");
+        opt_choice("Shader compilation", &g_settings.sync_shaders, sh_modes, 3, SHADER_ASYNC,
+                   "Async (default): never waits - an effect seen for the first time is missing for a frame or two "
+                   "(a brief flash) instead of the game freezing while it compiles. Smart: waits only on fullscreen / "
+                   "compute passes. Sync: always waits (no pop-in, but long freezes until the shader cache is warm).");
     }
 
     opt_end();
