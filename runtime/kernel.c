@@ -730,6 +730,18 @@ static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc) {
         c->x[1], c->x[2], pc);
 }
 
+// The guest's calls that led to an SVC, logged: its frame records ([fp] = the caller's fp, [fp + 8] = return address)
+static void guest_calls(uint64_t fp) {
+    for (int i = 0; i < 16 && fp >= GUEST_LO && !(fp & 7); i++) {
+        uint64_t lr = ((uint64_t *)(uintptr_t)fp)[1], off = 0;
+        const char *name = loader_symbol_at(lr, &off);
+        LOG("[kernel]   called from %llx %s+%#llx\n", (unsigned long long)lr, name ? name : "?", (unsigned long long)off);
+        uint64_t next = ((uint64_t *)(uintptr_t)fp)[0];
+        if (next <= fp) break;
+        fp = next;
+    }
+}
+
 static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     uint64_t *x = c->x;
     switch (imm) {
@@ -858,8 +870,16 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         break;
     case 0x18: {  // WaitSynchronization(_, handles, count, timeout)
         int32_t idx = -1;
+        uint32_t first = x[2] > 0 ? *(uint32_t *)(uintptr_t)x[1] : 0;
         x[0] = svc_wait_synchronization(x[1], (int32_t)x[2], (int64_t)x[3], &idx);
         x[1] = (uint32_t)idx;
+        if (x[0] == R_INVALID_HANDLE) {  // (a service that should have handed out an event didn't: who waits)
+            static int nlog;
+            if (nlog++ < 3) {
+                LOG("[kernel] WaitSynchronization on an invalid handle (first %#x)\n", first);
+                guest_calls(x[29]);
+            }
+        }
         break;
     }
     case 0x19: {  // CancelSynchronization
@@ -904,6 +924,7 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
         if (x[1] && x[2] == 4)  // (nn::Abort: the info is the failing Result - module + description)
             LOG("[kernel] svcBreak result %#x (module %u, description %u)\n", *(uint32_t *)(uintptr_t)x[1],
                 *(uint32_t *)(uintptr_t)x[1] & 0x1FF, (*(uint32_t *)(uintptr_t)x[1] >> 9) & 0x1FFF);
+        guest_calls(x[29]);
         FATAL("svcBreak(reason=%llx, info=%llx, size=%llx) at %llx\n", x[0], x[1], x[2], pc);
     case 0x27: debug_string(x[0], x[1]); x[0] = R_OK; break;
     case 0x29: {  // GetInfo(_, id0, handle, id1)
