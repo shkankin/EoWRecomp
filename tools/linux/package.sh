@@ -40,6 +40,10 @@ llvm-strip --strip-debug "$APPDIR/usr/bin/eowrecomp"  # (symbols stay: crash bac
 cp docs/icon/icon_1024.png "$APPDIR/usr/bin/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$APPDIR/usr/bin/"  # (start screen font, OFL)
 cp third_party/fonts/Baloo2/OFL.txt "$APPDIR/usr/bin/Baloo2-OFL.txt"
+# the game's system font substitute when the system has no DejaVu Sans (runtime/hle/pl.c looks for this copy last):
+# Bazzite / Fedora Atomic ships without it, and the game stopped at boot ("no usable system font substitute")
+cp third_party/fonts/DejaVu/DejaVuSans.ttf "$APPDIR/usr/bin/"
+cp third_party/fonts/DejaVu/LICENSE "$APPDIR/usr/bin/DejaVu-LICENSE"
 cp README.md LICENSE "$APPDIR/usr/bin/"  # (licenses and source links of the bundled components: README "License")
 [ -d "$L/helper/eowgen" ] || { echo "no game code generator helper ($L/helper/eowgen): run make gen-helper first"; exit 1; }
 cp -R "$L/helper/eowgen" build/zig "$APPDIR/usr/bin/"
