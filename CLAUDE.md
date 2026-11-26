@@ -17,8 +17,10 @@ estado atual e próximo passo: `docs/STATUS.md` (leia antes de começar).
   para esses arquivos.
 - Extração: `tools/nca_extract.py` (o hactool não lê o RomFS comprimido deste NCA) para `extracted/`
   (`exefs/`, `romfs/`). Uma cópia filtrada das chaves, se precisar, vai para o scratchpad, nunca para o repo.
-- Versão fixa: **title 01008CF01BAAC000, v0 (1.0.0)**, build IDs em `docs/STATUS.md`. Endereços de patches e HLE
-  valem só para ela.
+- Versões: **title 01008CF01BAAC000, v0 (1.0.0)** e **1.1.0** (update v196608, o `.nsp` do update ao lado do
+  pacote do jogo; lido por `runtime/nxpkg.c`, pedido do usuário em 2026-11-25). Build IDs do `main` em
+  `runtime/ui/launcher.mm` (`GAME_BUILDS`) e `docs/STATUS.md`. Endereços de patches e HLE valem só para a versão
+  em que foram medidos: conferir nas duas.
 
 ## Código
 - Código gerado (`generated/`) nunca é editado à mão: mudanças vão em `tools/lifter.py`, `tools/gen.py` ou
