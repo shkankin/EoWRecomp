@@ -14,12 +14,24 @@ static uint32_t new_event_handle(void) {
 // ------------------------------------------------------------------ hid
 KSharedMem *g_hid_shmem;
 static uint32_t hid_shmem_handle;
-RT_ON_RESET(hid_reset) { g_hid_shmem = NULL; hid_shmem_handle = 0; }
+static int64_t npad_hold_type;  // SetNpadJoyHoldType's (0 vertical, the default; 1 horizontal)
+RT_ON_RESET(hid_reset) { g_hid_shmem = NULL; hid_shmem_handle = 0; npad_hold_type = 0; }
+
+// The shared memory's npad condition (0x3E200; the SDK's NpadSharedMemoryAccessor::GetNpadCondition, revision 5 of
+// ActivateNpadWithRevision): newer SDKs (Echoes of Wisdom 1.1.0's) read the hold type there instead of asking
+// (GetNpadJoyHoldType, cmd 121) and abort with hid 710 when it isn't marked valid. {u32; u32 initialized; u32 hold
+// type; u8 valid}; written whenever the hold type changes.
+static void npad_condition(KSharedMem *m) {
+    if (!m || !m->guest_addr) return;
+    uint8_t *c = (uint8_t *)(uintptr_t)m->guest_addr + 0x3E200;
+    uint32_t one = 1, hold = (uint32_t)npad_hold_type;
+    memcpy(c + 4, &one, 4), memcpy(c + 8, &hold, 4), c[0xC] = 1;
+}
 
 static void applet_resource(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     if (req->cmd == 0) {  // GetSharedMemoryHandle
-        if (!g_hid_shmem) g_hid_shmem = kernel_create_shared_memory(0x40000, NULL, &hid_shmem_handle);
+        if (!g_hid_shmem) g_hid_shmem = kernel_create_shared_memory(0x40000, npad_condition, &hid_shmem_handle);
         resp->copy_handles[resp->ncopy++] = hid_shmem_handle;
     }
 }
@@ -30,11 +42,16 @@ SERVICE("hid", hid) {
     case 0: ipc_return_object(resp, service_new("IAppletResource", applet_resource, NULL)); break;
     case 40: case 106: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
     case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
-    case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
+    case 120: npad_hold_type = IN(int64_t, 8); npad_condition(g_hid_shmem); break;  // SetNpadJoyHoldType(aruid, type)
+    case 121: OUT(int64_t, 0) = npad_hold_type; resp_size(resp, 8); break;  // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
     case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
-    default: break;  // Activate*/Set*: accept
+    default: {  // Activate*/Set*: accept (logged once per command: a newer SDK's request may need an answer)
+        static uint8_t seen[1024];
+        if (req->cmd < 1024 && !seen[req->cmd]++) LOG("[hid] cmd %u (accepted)\n", req->cmd);
+        break;
+    }
     }
 }
 
