@@ -120,7 +120,10 @@ static void pick_device(void) {
     }
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
-    LOG("[vk] using %s\n", g_vk.props.deviceName);
+    VkPhysicalDeviceVulkan12Properties p12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
+    VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p12};
+    vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);  // (driver version: driver crashes are matched against its bugs)
+    LOG("[vk] using %s, driver %s %s\n", g_vk.props.deviceName, p12.driverName, p12.driverInfo);
 }
 
 bool g_host_query_reset;
