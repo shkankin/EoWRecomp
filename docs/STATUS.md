@@ -1,6 +1,54 @@
 # Status
 
-Atualizado: 2026-11-24 (sessão 9: Windows / RTX 3070 — ver abaixo). Antes: 2026-11-20 (sessão 8: Linux x86-64 / RX 7600 RADV — `v0.5.0`: pré-compilação de shaders no launcher (`shader_prep`), padrão `SHADER_SYNC`, suporte ao RecompLauncher e correção da iluminação/IBL dinâmica de cubemap).
+Atualizado: 2026-11-25 (sessão 10: versão 1.1.0 do jogo, Bazzite / AppImage, Async por padrão — ver abaixo). Antes: 2026-11-24 (sessão 9: Windows / RTX 3070). Antes: 2026-11-20 (sessão 8: Linux x86-64 / RX 7600 RADV — `v0.5.0`: pré-compilação de shaders no launcher (`shader_prep`), padrão `SHADER_SYNC`, suporte ao RecompLauncher e correção da iluminação/IBL dinâmica de cubemap).
+
+## Sessão 10 (2026-11-25): versão 1.1.0 do jogo; Linux (Bazzite) pelo AppImage; Async por padrão
+
+O usuário vai jogar no Bazzite (Fedora Atomic, Radeon 890M, aberto pela Steam / Gamescope) e pediu a versão 1.1.0
+(o `.nsp` do update ao lado do `.xci`, como em outros recomps).
+
+### Versão 1.1.0 (update v196608, `main` build id `9f221e1afa65ba54`)
+- **Pacote (`runtime/nxpkg.c`, `nx_setup_update`)**: o ExeFS do update substitui o da base; o RomFS do update é lido
+  sobre o da base sem cópia: IndirectStorage (BucketTree {virt, phys, storage}: storage 0 = seção RomFS do programa
+  base, 1 = dados do patch) e AesCtrCounterExtendedStorage (AES-CTR com a geração do contador por faixa), no nível da
+  seção, abaixo do IVFC e do CompressedStorage descritos pelo fs header do patch. `romfs.src` ganha `patch_*`,
+  `indirect`, `ctrex`. Verificado: `tools/test_nxpkg.c --update` confere 3025 blocos amostrados contra a árvore de
+  hashes (IVFC) da própria seção: 2944 vindos da base, 81 do update, todos SHA-256 iguais.
+- **Launcher**: os pacotes menores ao lado do jogo são tentados como update (outro título / DLC: ignorados); versões
+  por build id em `runtime/paths.c` (`rt_game_version`); a tela inicial mostra "Nintendo Switch · v1.1.0".
+- **Módulos de SDK mais novo**: `sdk`, `subsdk0`, `subsdk1` só têm `DT_GNU_HASH` (sem `DT_HASH`) e os quatro usam
+  `DT_RELR`. Loader e `tools/nso.py` contavam 0 símbolos ("nn::init::Start not found", 4435 imports em stubs) e não
+  aplicavam as relocações RELR (o gen.py perdia ~449 mil inícios de função). Corrigido nos dois; 1.0.0 igual.
+- **hid**: o SDK novo lê `GetNpadJoyHoldType` da memória compartilhada (npad condition em `0x3E200`, revisão 5 do
+  `ActivateNpadWithRevision`) e abortava com hid 710; a condição agora é escrita (e `SetNpadJoyHoldType` é seguido).
+- **am**: `IApplicationFunctions` 210 devolve o evento que `nn::oe::GetOperationMode` espera (sem ele, o jogo ficava
+  em loop no handle 0 no boot). `GetDisplayVersion` responde a versão real.
+- **Diagnóstico**: `svcBreak` e espera em handle inválido mostram a cadeia de chamadas do jogo com símbolos (achou os
+  dois problemas acima).
+- **Resultado (Windows / RTX 3070, Vulkan)**: setup pelo launcher com XCI + update + keys, código do jogo gerado em
+  24 min, boot até o prólogo a 60 fps; os saves do usuário (feitos na 1.0.0) listados e carregados, Zelda andando
+  na cela do subterrâneo do castelo, 60 fps, sem erros no log.
+- Não testado ainda: Linux com a 1.1.0 (mesmo código; o AppImage novo vai ao usuário), jogo longo na 1.1.0, se um
+  save gravado na 1.1.0 abre na 1.0.0 (provavelmente não: o usuário deve manter cópia dos saves).
+
+### Linux / Bazzite (AppImage)
+- O jogo parava no boot com `FATAL: no usable system font substitute`: o Bazzite não tem DejaVu Sans e o AppImage não
+  levava a cópia que `runtime/hle/pl.c` procura ao lado do executável. Agora leva (`tools/linux/package.sh`).
+- No Bazzite com o modo Sync (o padrão), quedas a 1-3 fps; com Async "muito melhor" (usuário).
+- O AppImage é gerado no GitHub (`.github/workflows/build-linux.yml` no fork, só artefato; baixado e apagado).
+
+### Async por padrão
+- `sync_shaders` padrão agora é Async (antes Sync; o menu marcava Smart como padrão). Medido na sessão 9: Sync 18-22
+  janelas com quadro >100 ms (pior 1,2-2,2 s), Async 8-10 (pior 0,18 s); confirmado pelo usuário nas duas máquinas.
+
+### O que o usuário deve testar
+- No Bazzite: Settings → Game files → escolher a pasta com o `.xci`, o `.nsp` do update e o `prod.keys` (o código do
+  jogo é gerado de novo, ~25 min). A tela inicial deve mostrar v1.1.0.
+- Jogar com os saves e observar travamentos novos (mandar `~/.local/share/eowrecomp/eowrecomp.log`).
+
+### Próximo passo
+- Confirmação da 1.1.0 no Linux pelo usuário; corrigir o que aparecer.
+- `ICommonStateGetter` 66 aparece como não tratado na 1.1.0 (inofensivo até agora).
 
 ## Sessão 9 (2026-11-24): Windows 11 / RTX 3070 Laptop (NVIDIA, Vulkan 1.4) — este tree no Windows
 
