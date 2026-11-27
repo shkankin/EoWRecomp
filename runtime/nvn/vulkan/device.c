@@ -176,6 +176,13 @@ static void create_device(void) {
     bool fault = has_ext(ep, ne, VK_EXT_DEVICE_FAULT_EXTENSION_NAME);  // device-lost diagnostics (vk_device_fault_report)
     if (fault) ext[n_ext++] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
     g_fault_ext = fault;
+    // The dynamic depth / stencil test enables (core 1.3) with a fragment shader that writes depth or stencil make RADV
+    // use a PS epilog, but RADV creates its epilog cache only when this extension's feature is enabled: without it
+    // the first such draw dereferences the missing cache (Mesa 26.3.1 radv_shader_part_cache_get, from
+    // vkCmdDrawIndexed). The void rift's draw (fs 72a46f5000) crashed the game on Bazzite / Radeon 890M at the
+    // cutscene after the first Ganon fight, every time. Harmless elsewhere: same dynamic states, through the extension.
+    bool eds = has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    if (eds) ext[n_ext++] = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
     // EOWRECOMP_VK_CHECKPOINTS=1 (NVIDIA): markers in the command buffers, read back on device loss (exec.c dl_*)
     g_vk.checkpoints = getenv("EOWRECOMP_VK_CHECKPOINTS") && has_ext(ep, ne, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
     if (g_vk.checkpoints) ext[n_ext++] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
@@ -216,7 +223,10 @@ static void create_device(void) {
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
-    VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT edsf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT,
+                                                            .extendedDynamicState = VK_TRUE, .pNext = fault ? (void *)&ff : (void *)&f11};
+    VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                   .pNext = eds ? (void *)&edsf : fault ? (void *)&ff : (void *)&f11};
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
