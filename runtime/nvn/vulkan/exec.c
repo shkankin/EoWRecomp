@@ -391,6 +391,9 @@ static struct {
     VkBuffer vb[17];
     VkDeviceSize vo[17];
 } cur_draw;
+void vk_cur_draw_note(void) {  // (device.c: a validation message names the draw it came from)
+    if (cur_draw.recording) LOG("[vk]   (during draw vs %llx fs %llx)\n", (unsigned long long)cur_draw.vs, (unsigned long long)cur_draw.fs);
+}
 static void cur_draw_dump(void) {
     if (!cur_draw.recording) return;
     fprintf(stderr, "renderer: crashed recording a draw: %s vs %llx fs %llx count %u inst %u pipeline %p\n",
@@ -2984,6 +2987,23 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
     if (!view) view = vk_dummy_view(st_->type);
+    if (st_->shadow) {  // a depth-compare texture given a colour image (validation: VUID-vkCmdDrawIndexed-None-06479)
+        NvnTexEntry *e = h && st.tpool && tic < (uint32_t)st.tpool->count ? &((NvnTexEntry *)st.tpool->entries)[tic] : NULL;
+        TexBackend *b = e && e->tex ? (TexBackend *)e->tex->backend : NULL;
+        if (!b || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
+            static uint64_t seen[64];
+            static int nseen;
+            uint64_t key = st.program->stages[1].code_addr ^ (uint64_t)i << 56 ^ (uint64_t)stage << 62;
+            bool known = false;
+            for (int k = 0; k < nseen; k++) known |= seen[k] == key;
+            if (!known && nseen < 64) {
+                seen[nseen++] = key;
+                LOG("[vk] depth-compare texture %d (stage %d) of vs %llx fs %llx is %s (format %d, %ux%u)\n", i, stage,
+                    (unsigned long long)st.program->stages[0].code_addr, (unsigned long long)st.program->stages[1].code_addr,
+                    !b ? "missing: the colour placeholder" : "a colour image", b ? (int)b->format : 0, b ? b->width : 0, b ? b->height : 0);
+            }
+        }
+    }
     if (stencil_key) smp = vk_default_sampler(false);  // integer texels can't be filtered
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};

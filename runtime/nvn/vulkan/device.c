@@ -27,8 +27,10 @@ static VkDebugUtilsMessengerEXT messenger;
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)type, (void)user;
-    static int n;
-    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && n++ < 500) LOG("[vk] %s\n", d->pMessage);
+    static int n, max = -1;
+    if (max < 0) max = getenv("EOWRECOMP_VK_VALIDATION_MAX") ? atoi(getenv("EOWRECOMP_VK_VALIDATION_MAX")) : 500;
+    extern void vk_cur_draw_note(void);
+    if (sev >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT && n++ < max) LOG("[vk] %s\n", d->pMessage), vk_cur_draw_note();
     return VK_FALSE;
 }
 
