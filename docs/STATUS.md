@@ -69,14 +69,16 @@ O usuário vai jogar no Bazzite (Fedora Atomic, Radeon 890M, aberto pela Steam /
   um PS epilog a um fragment shader que escreve profundidade/stencil quando o depth/stencil test enable é dinâmico
   (nós usamos o core 1.3), mas só cria o cache de epilogs se `extendedDynamicState` (ou GPL / shader object / EDS3)
   estiver habilitado. Correção: habilitar `VK_EXT_extended_dynamic_state` quando existir (06ebc7b).
-- Windows sem mudança (60 fps). **Falta o usuário confirmar no Bazzite.**
+- Windows sem mudança (60 fps). **Confirmado pelo usuário no Bazzite**: a cutscene passa e o jogo segue (só o quadro preto
+  do Async, shaders compilando). PR patrickksmdev/EoWRecomp#5 (`pr/radv-epilog`).
 - Ferramentas: `EOWRECOMP_VK_VALIDATION=1` com a camada da Khronos (nightly, `C:\EoW\vklayer`, `VK_ADD_LAYER_PATH`),
   `EOWRECOMP_VK_VALIDATION_MAX`; crash dentro do driver imprime o draw atual; o log mostra a versão do driver.
 - Achado lateral da validação: na abertura, uma textura de comparação de profundidade recebe imagem de cor
   (VUID 06479; o log agora diz qual shader). Não causa o crash; investigar depois.
 
 ### Próximo passo
-- Confirmar o crash corrigido no Bazzite; se sim, PR para o Patrick (afeta qualquer AMD no Linux).
+- Quadros pretos curtos quando aparecem gráficos novos (Async: draws pulados enquanto os shaders compilam; somem
+  depois da primeira vez, com o cache). Ver se a preparação de shaders pode cobrir mais desses.
 - Corrigir o que o usuário encontrar jogando (log do Bazzite).
 - `ICommonStateGetter` 66 aparece como não tratado na 1.1.0 (inofensivo até agora).
 
